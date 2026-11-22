@@ -1,0 +1,9 @@
+# Never commit private Readwise credentials, on-device state or local logs.
+**/token.txt
+**/state.json
+**/status.txt
+**/sync.log
+**/backfill.log
+.DS_Store
+__pycache__/
+*.pyc
