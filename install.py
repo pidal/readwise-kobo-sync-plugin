@@ -34,7 +34,8 @@ def main():
             continue
         shutil.copy2(src, dst)
         print('Installed', dst.relative_to(device))
-    print('\nInstalled. Next: create .adds/readwise-sync/token.txt on your Kobo drive.')
+    print('\nInstalled or upgraded. Existing token.txt and state.json were preserved.')
+    print('On first install only: create .adds/readwise-sync/token.txt.')
     print('Put ONLY your token from https://readwise.io/access_token in that file.')
     print('Safely eject the Kobo, turn on Wi-Fi, and use NickelMenu > Sync to Readwise.')
     return 0

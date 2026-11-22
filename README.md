@@ -1,12 +1,13 @@
-# Kobo Readwise Sync (NickelMenu) — v1.0
+# Kobo Readwise Sync (NickelMenu) — v1.1
 
 Send highlights from Kobo's built-in Nickel reader to Readwise, including
 sideloaded EPUBs and books that exist in the Kobo database.
 
-**Status: locally tested beta.** The included Linux ARM and ARM64 binaries
-are cross-compiled and the code has passed automated local database/API-mock
-tests, but has NOT been physically tested on a Kobo device or with a real
-Readwise account. Firmware differences may require adjustments.
+**Status: locally tested beta.** The v1.0 highlight exporter has been confirmed
+working by a Kobo user. New cover synchronization in v1.1 is tested with
+synthetic EPUBs, Kobo cached JPEGs, and a mocked Readwise Books API, but
+**has not yet been verified against a live account/on-device**. Firmware and
+book-format differences may require adjustments.
 
 ## Install (no KOReader, Python or curl required on the Kobo)
 
@@ -18,8 +19,11 @@ Readwise account. Firmware differences may require adjustments.
        python3 install.py /media/YOU/KOBOeReader
 
    On Windows, an example is `py install.py E:\` (replace E: with your Kobo drive).
-3. Obtain a private access token from <https://readwise.io/access_token>.
-4. On the Kobo drive, create the following **plain UTF-8 text file**:
+   **Upgrading from v1.0:** This is safe to copy over the old plugin. Do NOT
+   delete `.adds/readwise-sync/token.txt` or `state.json`. Existing highlight
+   sync history is retained, and already-uploaded books can gain covers.
+3. On your first installation only, obtain a private access token from <https://readwise.io/access_token>.
+4. On your first installation only, create this **plain UTF-8 text file**:
 
        .adds/readwise-sync/token.txt
 
@@ -28,7 +32,8 @@ Readwise account. Firmware differences may require adjustments.
    (restart the Kobo if the menu items do not show immediately).
 6. Enable **Wi-Fi** on the Kobo and connect to a network.
 7. Open **NickelMenu > Sync to Readwise** from Home or the reading menu.
-   Then use **Readwise sync status** to see how many highlights were sent.
+   Then use **Readwise sync status** to see how many highlights and covers
+   were uploaded. No new highlights are required to backfill covers.
    An initial library upload may take some time. Keep Wi-Fi on until completion.
 
 **Never share the token file.** Kobo's USB-readable partition is not encrypted;
@@ -50,6 +55,16 @@ provide access to your Readwise account. Keep backups of your highlights.
   8,000-character parts. Notes over 8,191 characters are truncated and labeled.
 - Batches 25 highlights per request, retries transient network errors,
   server errors and rate limits up to 3 attempts.
+- Automatically looks for images embedded in readable local `.epub`/`.kepub.epub`
+  files using the EPUB OPF metadata (and reasonable cover-name fallback).
+  For other books, tries cached images from `.kobo/images` and `.kobo-images`.
+- Requests your existing Readwise Books list, matches exact title + author,
+  and uploads a base64-encoded cover using the official Readwise Books PATCH
+  endpoint **only if Readwise has its default book icon**. It does not
+  overwrite real cover artwork. Ambiguous same-title/author matches are
+  skipped instead of risking the wrong book.
+- Covers are synced even when no new highlights need uploading. All cover
+  bytes are sent only to the authenticated Readwise API over HTTPS.
 - Writes a short result to `.adds/readwise-sync/last-result.txt`; detailed
   run messages, without highlight text or token, go to `run.log`.
 - If Wi-Fi is off, it fails without advancing sync state. Retry once connected.
@@ -61,6 +76,12 @@ provide access to your Readwise account. Keep backups of your highlights.
   text/title/author combinations; that is controlled by Readwise.
 - It does not export KOReader highlights, handwriting, bookmarks without
   highlighted text, or annotation-only notes.
+- Cover sync is best-effort: DRM-protected files, uncached covers, missing EPUB
+  cover metadata, or nonmatching Readwise book titles may be skipped. The
+  status screen shows how many covers were uploaded, already present, unmatched,
+  or ambiguous. Image sizes are limited to 4 MB each.
+- Covers present in Readwise, even if incorrect, are intentionally preserved.
+  To correct one, use Readwise **Edit Metadata** manually.
 - No guarantee that Kobo Store's official Readwise sync and this integration
   will produce exactly the same book grouping; back up data before bulk import.
 - Very old Kobo firmware, unusual CPU architectures, or future database schema
@@ -78,6 +99,9 @@ provide access to your Readwise account. Keep backups of your highlights.
 - **HTTP 401/403**: invalid Readwise token; check account and token file.
 - **TLS / certificate error**: verify Kobo date/time and Wi-Fi; see run.log.
 - **Exec format error**: send me your Kobo model, firmware version and `uname -m`.
+- **Covers not uploaded**: verify that the Kobo EPUB has an embedded image or
+  Kobo has cached a cover. Confirm that Readwise has the same book title and
+  author. If Readwise already has a nondefault cover, it is preserved.
 - **Still running**: read `.adds/readwise-sync/last-result.txt` after a moment.
 - **Stuck lock**: if the previous process crashed and no sync is running,
   remove the **directory** `.adds/readwise-sync/.lock` (hidden).
@@ -120,6 +144,6 @@ This does **not** uninstall NickelMenu or modify Kobo's own database.
 
 ## References
 
-- Readwise highlight CREATE endpoint: https://readwise.io/api_deets
+- Readwise highlight CREATE, Book LIST, and Book UPDATE endpoints: https://readwise.io/api_deets
 - NickelMenu documentation: https://pgaskin.net/NickelMenu/
 - Kobo database Bookmark schema reference: https://github.com/valeriangalliat/kobo-highlights-to-calibre

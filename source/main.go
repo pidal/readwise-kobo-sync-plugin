@@ -41,6 +41,7 @@ type Highlight struct {
 	Created string
 	Title   string
 	Author  string
+	ImageID string
 }
 
 type ReadwiseHighlight struct {
@@ -137,7 +138,7 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 		return nil, fmt.Errorf("open Kobo highlights: %w", err)
 	}
 	defer r.close()
-	type metadata struct{ title, author string }
+	type metadata struct{ title, author, imageID string }
 	books := make(map[string]metadata)
 	err = r.rows("content", func(row map[string]any) error {
 		id := str(row["contentid"])
@@ -151,7 +152,7 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 		title := strings.TrimSpace(str(row["title"]))
 		author := strings.TrimSpace(str(row["attribution"]))
 		if title != "" {
-			books[id] = metadata{title, author}
+			books[id] = metadata{title, author, strings.TrimSpace(str(row["imageid"]))}
 		}
 		return nil
 	})
@@ -179,7 +180,7 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 		}
 		highlights = append(highlights, Highlight{
 			ID: id, Volume: vol, Text: text, Note: strings.TrimSpace(str(row["annotation"])),
-			Created: str(row["datecreated"]), Title: book.title, Author: book.author,
+			Created: str(row["datecreated"]), Title: book.title, Author: book.author, ImageID: book.imageID,
 		})
 		return nil
 	})
@@ -335,7 +336,7 @@ func postBatch(client *http.Client, url, token string, batch []pendingItem) erro
 		}
 		request.Header.Set("Authorization", "Token "+token)
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", "KoboReadwiseSync/1.0")
+		request.Header.Set("User-Agent", "KoboReadwiseSync/1.1")
 		response, err := client.Do(request)
 		if err != nil {
 			if attempt == 2 {
@@ -384,9 +385,6 @@ func sync(dir, dbpath, url string, client *http.Client) (string, error) {
 		return "", err
 	}
 	pending := makePending(items, s.Uploaded)
-	if len(pending) == 0 {
-		return fmt.Sprintf("Already up to date: %d Kobo highlights scanned.", len(items)), nil
-	}
 	if client == nil {
 		client, err = newHTTPClient()
 		if err != nil {
@@ -411,5 +409,11 @@ func sync(dir, dbpath, url string, client *http.Client) (string, error) {
 		}
 		uploadedCount += len(batch)
 	}
-	return fmt.Sprintf("Synced %d new highlights. Kobo highlights scanned: %d.", uploadedCount, len(items)), nil
+	coverStatus, err := syncCovers(client, dbpath, url, token, items)
+	summary := fmt.Sprintf("Synced %d new highlights. Kobo highlights scanned: %d. Covers: %d uploaded, %d already present, %d unmatched, %d ambiguous.",
+		uploadedCount, len(items), coverStatus.uploaded, coverStatus.existing, coverStatus.unmatched, coverStatus.ambiguous)
+	if err != nil {
+		return "", fmt.Errorf("%s Cover sync failed: %w", summary, err)
+	}
+	return summary, nil
 }
