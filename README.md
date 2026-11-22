@@ -1,197 +1,212 @@
-# Kobo Readwise Sync (NickelMenu) — v1.2
+# Kobo Readwise Sync (NickelMenu) — v1.3
 
-Send highlights from Kobo's built-in Nickel reader to Readwise, including
-sideloaded EPUBs and books that exist in the Kobo database.
+Sync highlights **one way, Kobo → Readwise**, directly over Wi-Fi, including
+sideloaded EPUBs. Kobo's database is read-only. Requires NickelMenu.
 
-**Status: locally tested beta.** v1.0 highlight uploading has been reported to
-work on a physical Kobo. Cover uploading (v1.1) and chapter metadata/backfill
-(v1.2) passed simulated database/API tests but **have not yet been verified
-against a live Readwise account/on-device**. Firmware and
-book-format differences may require adjustments.
+**Status: locally tested beta.** Basic uploads were reported working on a
+physical Kobo in v1.0. v1.3's ID migration, updates, locations and cover uploads
+have automated local coverage but still need verification on a real Kobo and
+Readwise account. No live credentials are bundled or needed for the tests.
 
-## Install (no KOReader, Python or curl required on the Kobo)
+## Install or upgrade
 
-1. You must already have [NickelMenu](https://pgaskin.net/NickelMenu/) installed.
-2. Connect your Kobo by USB. Open this archive, then copy the **contents** of
-   its `KOBOeReader` folder into the **root of the mounted KOBOeReader drive**.
-   Alternatively, with Python 3 on your COMPUTER run:
+Connect Kobo by USB and run on your computer:
 
-       python3 install.py /media/YOU/KOBOeReader
+```sh
+python3 install.py /path/to/KOBOeReader
+```
 
-   On Windows, an example is `py install.py E:\` (replace E: with your Kobo drive).
-   **Upgrading from v1.0/v1.1:** This is safe to copy over the old plugin. Do NOT
-   delete `.adds/readwise-sync/token.txt` or `state.json`. Existing highlight
-   sync history is retained, and already-uploaded books can gain covers.
-3. On your first installation only, obtain a private access token from <https://readwise.io/access_token>.
-4. On your first installation only, create this **plain UTF-8 text file**:
+On Windows: `py install.py E:\` (replace E: with your drive).
 
-       .adds/readwise-sync/token.txt
+The installer:
 
-   Paste your token as the **only** content (no quotes or `Token ` prefix).
-5. Safely eject/unmount the Kobo and allow NickelMenu to load the new config
-   (restart the Kobo if the menu items do not show immediately).
-6. Enable **Wi-Fi** on the Kobo and connect to a network.
-7. Open **NickelMenu > Sync to Readwise** from Home or the reading menu.
-   Then use **Readwise sync status** to see how many highlights and covers
-   were uploaded. No new highlights are required to backfill covers.
-   An initial library upload may take some time. Keep Wi-Fi on until completion.
+- Copies only an explicit list of plugin executables, launch scripts and menu config.
+- Backs up existing personal data to `.adds/readwise-sync-backups/upgrade-*/`.
+- Moves old `token.txt` and `state.json` to the new names below, retaining history.
+- Stops if old and new personal files conflict, rather than choosing a copy.
+- Adds `.adds` to Kobo's `ExcludeSyncFolders` setting while retaining existing rules.
+  The original `.kobo/Kobo/Kobo eReader.conf` is backed up next to it with
+  `.readwise-sync.bak` appended. It does not edit Kobo's SQLite database.
 
-**Never share the token file.** Kobo's USB-readable partition is not encrypted;
-anyone with physical/USB access to your Kobo can read it. Readwise API tokens
-provide access to your Readwise account. Keep backups of your highlights.
+For a **first installation**, obtain your private token at
+<https://readwise.io/access_token> and save it in this plain UTF-8 file:
 
-## Chapter metadata and reading positions (new in v1.2)
+```text
+.adds/readwise-sync/data/token.conf
+```
 
-- For new highlights, the plugin joins `Bookmark.ContentID` to the corresponding
-  chapter record in Kobo's `content` table and prepends `Chapter: <title>` to
-  the Readwise highlight **note**. The highlight text stays unchanged, and any
-  Kobo note appears after the chapter on a new paragraph.
-- If the database contains chapter order and start path for **all** highlights
-  in a book, the plugin sends a book-order ordinal (`location_type: order`,
-  `location: 1, 2, 3...`). It is not a real page number or a position compatible
-  with Kindle. Adding new highlights earlier in a book can cause ordinal
-  collisions with previously uploaded items; the position is best-effort.
-- For existing Readwise highlights uploaded using v1.0/v1.1, select
-  **NickelMenu > Backfill Readwise chapters** (Home menu). This is **opt-in**:
-  it fetches Readwise's matching book and highlight list and only PATCHes the
-  *note* of uniquely matched highlights known in the plugin's `state.json`.
-  It preserves existing Readwise notes and skips duplicates/ambiguous books.
-  It does **not** reset your sync history, reupload highlights, overwrite
-  already marked `Chapter:` notes or change existing highlight locations.
-- Actual fixed page numbers for standard EPUB/KEPUB highlights **cannot be
-  recovered reliably** from the Kobo database: `ChapterProgress` depends on
-  layout/font and often changes. The plugin deliberately does not fabricate
-  page numbers or send `location_type: page`.
-- Some sideloaded/DRM books do not expose meaningful chapter titles; such
-  highlights will remain without a chapter label. Chapters embedded within
-  an HTML content file may also need deeper EPUB navigation parsing.
+Put only the token in it: no quotes or `Token ` prefix. `.conf` is the filename
+extension; its contents are still plain text.
 
-## Behavior
+Safely eject, restart Kobo, connect Wi-Fi, then use **NickelMenu → Sync to Readwise**.
+Use **Readwise sync status** to see results.
 
-- Reads `.kobo/KoboReader.sqlite` *read-only* (does not modify it).
-- Handles SQLite WAL commits that have not been checkpointed, ordinary/long
-  SQLite records, and large tables. Does not require `sqlite3` on Kobo.
-- Extracts highlight text, notes, title, author, date, chapter title, and book-order position when available.
-- Skips hidden/deleted highlights and annotation-only records with no highlighted text.
-- Sends to `https://readwise.io/api/v2/highlights/` over TLS 1.2+ using a
-  bundled CA certificate store and normal OS roots. No other network endpoints.
-- Only sends new highlight IDs on subsequent runs. Tracks sent IDs in
-  `.adds/readwise-sync/state.json`, which is saved after each accepted batch.
-- Splits highlights longer than Readwise's 8,191-character API limit into
-  8,000-character parts. Notes over 8,191 characters are truncated and labeled.
-- Batches 25 highlights per request, retries transient network errors,
-  server errors and rate limits up to 3 attempts.
-- Automatically looks for images embedded in readable local `.epub`/`.kepub.epub`
-  files using the EPUB OPF metadata (and reasonable cover-name fallback).
-  For other books, tries cached images from `.kobo/images` and `.kobo-images`.
-- Requests your existing Readwise Books list, matches exact title + author,
-  and uploads a base64-encoded cover using the official Readwise Books PATCH
-  endpoint **only if Readwise has its default book icon**. It does not
-  overwrite real cover artwork. Ambiguous same-title/author matches are
-  skipped instead of risking the wrong book.
-- Covers are synced even when no new highlights need uploading. All cover
-  bytes are sent only to the authenticated Readwise API over HTTPS.
-- Writes a short result to `.adds/readwise-sync/last-result.txt`; detailed
-  run messages, without highlight text or token, go to `run.log`.
-- If Wi-Fi is off, it fails without advancing sync state. Retry once connected.
+## Personal files: KEEP THESE WHEN UPGRADING
 
-## Limitations and compatibility
+| Path on Kobo | Purpose |
+| --- | --- |
+| `.adds/readwise-sync/data/token.conf` | Private Readwise access token |
+| `.adds/readwise-sync/data/sync-state.json` | Upload history, Readwise book/highlight IDs, content fingerprints and interrupted-upload recovery data |
+| `.adds/readwise-sync/data/sync-state.json.v1.bak` | Original v1 history before its first schema upgrade, when applicable |
+| `.adds/readwise-sync/data/sync-review.log` | Hashed local IDs needing review and the reason; no token/highlight text |
+| `.adds/readwise-sync-backups/` | Installer's personal-data backups from previous upgrades |
 
-- **Upload-first**: changes/deletions to an already uploaded Kobo highlight or
-  note are **not propagated** to Readwise, except for the manual chapter-only backfill action. Readwise may also deduplicate identical
-  text/title/author combinations; that is controlled by Readwise.
-- It does not export KOReader highlights, handwriting, bookmarks without
-  highlighted text, or annotation-only notes.
-- Cover sync is best-effort: DRM-protected files, uncached covers, missing EPUB
-  cover metadata, or nonmatching Readwise book titles may be skipped. The
-  status screen shows how many covers were uploaded, already present, unmatched,
-  or ambiguous. Image sizes are limited to 4 MB each.
-- Covers present in Readwise, even if incorrect, are intentionally preserved.
-  To correct one, use Readwise **Edit Metadata** manually.
-- No guarantee that Kobo Store's official Readwise sync and this integration
-  will produce exactly the same book grouping; back up data before bulk import.
-- Very old Kobo firmware, unusual CPU architectures, or future database schema
-  changes might be incompatible. The ARM binary is compiled for ARMv5-compatible
-  Linux userspace, and ARM64 is supported; both binaries are statically linked.
-- Reading Kobo's live database is best effort: if Nickel writes while extraction
-  is underway, the program can return an error. Retry. No data is deleted.
-- The on-device clock must be approximately correct for HTTPS certificate checks.
-- Only use Readwise API tokens you own. No credentials are included in this package.
+**The entire `data/` folder is personal data.** It is excluded from Git and is
+never included in the release payload or copied over by the installer. Back it
+up before upgrades. Recovery state includes highlight text and notes; keep it
+private along with your token. Kobo's USB storage is not encrypted.
+
+The code lives alongside it in `.adds/readwise-sync/`: launch scripts and ARM
+executables can be replaced. `last-result.log`, `run.log` and `backfill.log` are
+runtime diagnostics, not sync history. Do not delete the history to fix a
+network error: retries preserve progress.
+
+Manual-copy installation is supported: copy only the **contents** of
+`KOBOeReader/` onto the mounted drive, retaining `data/` and old personal files.
+The next sync migrates legacy names automatically. For the book-scanning fix,
+use the installer or merge the following into the existing `[FeatureSettings]`
+section of `.kobo/Kobo/Kobo eReader.conf` (retain any existing exclusion rule):
+
+```ini
+[FeatureSettings]
+ExcludeSyncFolders=\\.adds(?:/|$)
+```
+
+## Files showing up as books
+
+Some Kobo firmware scans hidden folders, including `.adds`. A `.txt` file there
+can therefore become a book. v1.3 uses `token.conf` and `last-result.log`, and the
+installer excludes `.adds` from scanning. It preserves other exclusion rules.
+
+Already imported library entries may remain after exclusion. First finish the
+upgrade, confirm the token/history are in `data/`, and back up that folder.
+Then remove stale plugin text-file entries through Kobo's library UI. Do not
+remove real books or delete the plugin folder. The installer does not directly
+clean Kobo's database. Kobo firmware upgrades may reset the exclusion setting;
+rerunning the installer restores it.
+
+## Locations
+
+Each highlight includes the information Kobo actually exposes:
+
+- A native Readwise numeric **order** location when all chapter indices and
+  start paths for that book's current highlights are available.
+- A **Kobo location** line in the first highlight part's note: chapter index
+  (Kobo's raw index), start-container path/CFI/span, and character offset, when
+  present. Chapter title and the personal note are also retained.
+
+These are reading positions, **not printed page numbers or Kindle locations**.
+The numeric order is the rank among the book's current highlights, not a fixed
+coordinate in the whole book. Adding an earlier highlight can change ranks;
+v1.3 PATCHes changed ranks on previously mapped highlights in the same sync.
+After an interrupted run, retry to finish those updates.
+
+For highlights adopted from an existing Readwise book, genuine page/offset
+location types are preserved. Readwise documents changing the numeric location
+but not its type with PATCH. If Kobo later lacks sufficient ordering data, the
+previous native number is retained; available Kobo path details remain in the
+note. The plugin does not invent missing page numbers. Books without chapter
+rows or paths may have incomplete location metadata.
+
+## One-way sync and recovery
+
+- Uploads new highlights; records the returned Readwise highlight and book IDs.
+  Each CREATE contains one highlight so an ID is never inferred from array order.
+- Updates an already mapped highlight's text, note and available order when
+  Kobo changes. Kobo is authoritative for those fields on update. Clearing a
+  Kobo note clears its personal-note portion in Readwise. Readwise-only note
+  edits can be overwritten by a later Kobo update; nothing is imported to Kobo.
+- Keeps fingerprints to skip unchanged highlights. It does not continuously
+  enforce Kobo content against edits made only in Readwise.
+- Saves upload intent **before** sending, then saves IDs and fingerprints after
+  acceptance. A subsequent run reconciles an interrupted upload before creating
+  another item, including when Kobo's text changed in the meantime.
+- Writes state using a flushed temporary file and atomic replacement. Corrupt
+  or conflicting history fails closed instead of triggering a full upload.
+- Reconciles v1.0–v1.2 history by unique title/author and unique highlight text.
+  Changed legacy text cannot always be matched: those entries need review.
+  Multiple matching Readwise books/highlights cause the run to stop without
+  guessing which object to modify.
+- Identical local passages in the same title/author grouping are reported for
+  review because Readwise deduplicates them and cannot reliably preserve both
+  independent Kobo notes. Unresolved entries are counted in status and listed
+  in `data/sync-review.log` after a completed run.
+- Removed/hidden Kobo highlights and obsolete long-text parts **are not deleted
+  from Readwise**. They are retained and reported for review. Book title/author
+  regrouping is not propagated to existing mapped Readwise objects.
+- Retries transient network errors, rate limits and server failures, up to three
+  attempts; paces API requests including list calls across different books.
+  No arbitrary lock expiry: a long-running sync keeps its lock.
+
+A first migration can take longer because it reads existing Readwise highlights.
+No offline queue is needed for ordinary unsent highlights: they remain in Kobo's
+DB and are picked up next time. This is not an exactly-once transaction across
+Kobo storage and Readwise; recovery uses saved intent and conservative matching.
+
+## Other behavior
+
+- Reads `.kobo/KoboReader.sqlite`, including committed SQLite WAL frames,
+  overflow records and large tables; validates WAL header/frame checksums.
+- Detects database/WAL changes across extraction and refuses active rollback
+  journals. It does not hold a SQLite snapshot lock: live reads remain best
+  effort. Retry if Nickel was writing during extraction.
+- Skips hidden/deleted and empty-text records. Does not export KOReader highlights,
+  handwriting, bookmarks without selected text, or annotation-only records.
+- Preserves highlight timestamps when available. Splits text into 8,000-character
+  parts and bounds notes to Readwise's 8,191-character limit.
+- Extracts embedded EPUB/KEPUB covers, with Kobo image-cache fallback. Uploads
+  only missing/default Readwise covers; preserves existing artwork. Requires an
+  unambiguous title/author match. Images are limited to 4 MB.
+- HTTPS uses TLS 1.2+ and OS/bundled CA certificates. All network operations go
+  to the authenticated Readwise API. Kobo's clock must be approximately correct.
+- **Backfill Readwise chapters** remains an optional menu action that adds
+  chapters to uniquely matched previously uploaded highlights while preserving
+  existing notes. Normal v1.3 sync already updates mapped highlights' metadata.
 
 ## Troubleshooting
 
-- **No menu item**: make sure `.adds/nm/readwise-sync` is present. Restart Kobo.
-- **Missing token**: create `token.txt` in `.adds/readwise-sync/`.
-- **HTTP 401/403**: invalid Readwise token; check account and token file.
-- **TLS / certificate error**: verify Kobo date/time and Wi-Fi; see run.log.
-- **Exec format error**: send me your Kobo model, firmware version and `uname -m`.
-- **Covers not uploaded**: verify that the Kobo EPUB has an embedded image or
-  Kobo has cached a cover. Confirm that Readwise has the same book title and
-  author. If Readwise already has a nondefault cover, it is preserved.
-- **Backfill skipped my book**: Kobo may not have a chapter row, or Readwise has
-  multiple books with the same title and author. This safety check avoids wrong-book edits.
-- **Still running**: read `.adds/readwise-sync/last-result.txt` after a moment.
-- **Stuck lock**: if the previous process crashed and no sync is running,
-  remove the **directory** `.adds/readwise-sync/.lock` (hidden).
-- **Want to reupload everything**: save a backup of `state.json` first. Deleting
-  it will cause a new full upload; Readwise can deduplicate, but duplicates are
-  not guaranteed to be eliminated in all cases.
+- **Missing token:** create `data/token.conf`, or retain legacy `token.txt` for migration.
+- **HTTP 401/403:** check the Readwise token and account.
+- **TLS error:** check Kobo's date/time, Wi-Fi and `run.log`.
+- **Need review:** inspect `data/sync-review.log`; do not reset history.
+- **Sync already running:** wait. After a crash/restart, and only when no sync is
+  running, remove the empty `.adds/readwise-sync/.lock` directory.
+- **Cover failure after uploads:** highlight progress is saved; retry.
+- **Missing chapters:** the book may not expose chapter rows in Kobo's database;
+  EPUB navigation parsing is not implemented.
+- **Stale/missing Readwise ID:** the run stops if a mapped remote highlight was
+  deleted. Restore/reconcile that item rather than deleting all sync history.
 
-### Developer commands (on desktop Linux, macOS or Windows with Go)
+## Development and validation
 
-    cd source
-    go test ./...
-    go build -o kobo-readwise-sync .
-    ./kobo-readwise-sync -db /path/to/KoboReader.sqlite -dir /path/to/config -dry-run
+```sh
+cd source
+go test ./...
+go build -o /tmp/kobo-readwise-sync .
+cd ..
+python3 tests/test_integration.py /tmp/kobo-readwise-sync
+python3 -m unittest discover -s tests -p 'test_install.py'
+```
 
-Cross-compile for Kobo:
+Cross-compile with `source/build.sh`; it tests first and creates both static
+Linux ARMv5 and ARM64 binaries in the payload. For older Kobo kernels use
+Go 1.23.12; newer Go toolchains can require newer Linux kernels. Set `GO` to a
+specific Go executable if needed. Neither Go nor Python is needed on the Kobo.
 
-    GOOS=linux GOARCH=arm GOARM=5 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o readwise-sync-arm .
-    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o readwise-sync-arm64 .
-
-A separate integration test uses Python 3's built-in sqlite3 for fake databases:
-
-    python3 tests/test_integration.py /path/to/kobo-readwise-sync
-
-## Files installed on the Kobo
-
-    .adds/nm/readwise-sync
-    .adds/readwise-sync/launch.sh
-    .adds/readwise-sync/status.sh
-    .adds/readwise-sync/backfill.sh
-    .adds/readwise-sync/readwise-sync-arm
-    .adds/readwise-sync/readwise-sync-arm64
-
-Your `token.txt`, `state.json`, `last-result.txt`, and `run.log` are created
-separately and intentionally not included in the release.
+The repository contains reconstructed v1.0/v1.1/v1.2 release commits and tags.
+They were reconstructed from release ZIP snapshots, not original development
+history. Keep `.git` on your computer; do not copy it to Kobo.
 
 ## Uninstall
 
-Remove `.adds/nm/readwise-sync` and `.adds/readwise-sync/` from the Kobo
-storage. Back up the latter folder if you want to preserve `state.json`.
-This does **not** uninstall NickelMenu or modify Kobo's own database.
+Back up `data/` first. Remove `.adds/nm/readwise-sync` and
+`.adds/readwise-sync/`. Personal backups in `.adds/readwise-sync-backups/` are
+separate. This does not remove Readwise highlights or uninstall NickelMenu.
+The scan exclusion is retained, since other `.adds` applications may need it.
 
 ## References
 
-- Readwise highlight CREATE, Book LIST, and Book UPDATE endpoints: https://readwise.io/api_deets
-- NickelMenu documentation: https://pgaskin.net/NickelMenu/
-- Kobo database Bookmark schema reference: https://github.com/valeriangalliat/kobo-highlights-to-calibre
-
-## Git repository (included in this archive)
-
-The ZIP includes a working `.git` directory at its **top level**, with the
-`main` branch and version tags `v1.0`, `v1.1`, and `v1.2`. The three commits
-are **reconstructed from the release ZIP snapshots**; they are not claimed
-to be the project's original step-by-step development history.
-
-After extracting the archive to a regular folder, run:
-
-```sh
-git log --oneline --decorate
-git status
-git diff v1.1..v1.2 -- source/
-```
-
-Do **not** copy the `.git` folder to your Kobo. Install only the contents of
-`KOBOeReader/` as described above. The `.gitignore` excludes the private
-Readwise token and sync state files from accidental `git add`.
+- [Readwise API](https://readwise.io/api_deets): CREATE IDs, deduplication, UPDATE and rate limits.
+- [NickelMenu](https://pgaskin.net/NickelMenu/).
+- [KFMon installer](https://github.com/NiLuJe/kfmon/blob/master/tools/install.sh): Kobo scan-exclusion setting and Qt INI escaping.
+- [SQLite file format](https://www.sqlite.org/fileformat2.html): WAL checksum algorithm.

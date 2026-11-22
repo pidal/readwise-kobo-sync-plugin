@@ -7,3 +7,14 @@
 .DS_Store
 __pycache__/
 *.pyc
+
+# v1.3 personal data and generated binaries
+**/data/
+**/readwise-sync-backups/
+**/token.conf
+**/sync-state.json*
+**/last-result.txt
+**/last-result.log
+**/run.log
+KOBOeReader/.adds/readwise-sync/readwise-sync-arm
+KOBOeReader/.adds/readwise-sync/readwise-sync-arm64

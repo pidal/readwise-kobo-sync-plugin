@@ -6,18 +6,17 @@ case "$(uname -m)" in
     arm*|*) BIN="$BASE/readwise-sync-arm" ;;
 esac
 if [ ! -f "$BIN" ]; then
-    printf 'Sync could not start: executable missing. Reinstall the plugin.\n' > "$BASE/last-result.txt"
+    printf 'Sync could not start: executable missing. Reinstall the plugin.\n' > "$BASE/last-result.log"
     exit 1
 fi
-printf 'Readwise sync started. Use the status menu item to check completion.\n' > "$BASE/last-result.txt"
 chmod +x "$BIN" 2>/dev/null || :
-"$BIN" > "$BASE/run.log" 2>&1
+"$BIN" >> "$BASE/run.log" 2>&1
 RC=$?
 if [ "$RC" -ne 0 ]; then
     # The Go program normally writes a detailed failure status itself.
     # Also handle binary startup failures, such as incompatible firmware.
-    if ! grep -q 'Sync failed:' "$BASE/last-result.txt" 2>/dev/null; then
-        printf 'Readwise sync failed to start/finish (exit %s). See run.log.\n' "$RC" > "$BASE/last-result.txt"
+    if ! grep -q 'Sync failed:' "$BASE/last-result.log" 2>/dev/null; then
+        printf 'Readwise sync failed to start/finish (exit %s). See run.log.\n' "$RC" > "$BASE/last-result.log"
     fi
 fi
 exit "$RC"

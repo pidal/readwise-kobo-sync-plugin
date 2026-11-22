@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -11,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,7 +29,6 @@ const (
 	defaultDB         = "/mnt/onboard/.kobo/KoboReader.sqlite"
 	readwiseURL       = "https://readwise.io/api/v2/highlights/"
 	maxHighlightRunes = 8000
-	batchSize         = 25
 )
 
 type Highlight struct {
@@ -69,8 +66,9 @@ type pendingItem struct {
 }
 
 type stateFile struct {
-	Version  int             `json:"version"`
-	Uploaded map[string]bool `json:"uploaded"`
+	Version  int                   `json:"version"`
+	Uploaded map[string]bool       `json:"uploaded"`
+	Records  map[string]syncRecord `json:"records,omitempty"`
 }
 
 func main() {
@@ -81,7 +79,7 @@ func main() {
 	backfill := flag.Bool("backfill-chapters", false, "opt-in chapter backfill of previously uploaded highlights")
 	flag.Parse()
 	if *status {
-		b, err := os.ReadFile(filepath.Join(*dir, "last-result.txt"))
+		b, err := os.ReadFile(filepath.Join(*dir, "last-result.log"))
 		if err != nil {
 			fmt.Println("Not synced yet.")
 			return
@@ -134,21 +132,19 @@ func acquireLock(dir string) error {
 	} else if !os.IsExist(err) {
 		return err
 	}
-	st, err := os.Stat(p)
-	if err == nil && time.Since(st.ModTime()) > 30*time.Minute {
-		if err := os.Remove(p); err == nil {
-			return os.Mkdir(p, 0700)
-		}
-	}
 	return errors.New("sync is already running (remove .adds/readwise-sync/.lock if it is stale)")
 }
 
 func writeStatus(dir, summary string) {
 	now := time.Now().Format("2006-01-02 15:04:05")
-	_ = os.WriteFile(filepath.Join(dir, "last-result.txt"), []byte(now+"\n"+summary+"\n"), 0600)
+	_ = os.WriteFile(filepath.Join(dir, "last-result.log"), []byte(now+"\n"+summary+"\n"), 0600)
 }
 
 func loadHighlights(dbpath string) ([]Highlight, error) {
+	before, err := databaseStamp(dbpath)
+	if err != nil {
+		return nil, err
+	}
 	r, err := openSQLite(dbpath)
 	if err != nil {
 		return nil, fmt.Errorf("open Kobo highlights: %w", err)
@@ -263,6 +259,13 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 		}
 		return highlights[i].Volume < highlights[j].Volume
 	})
+	after, err := databaseStamp(dbpath)
+	if err != nil {
+		return nil, err
+	}
+	if before != after {
+		return nil, errors.New("Kobo database changed during extraction; retry sync")
+	}
 	return highlights, nil
 }
 
@@ -362,7 +365,7 @@ func makePending(items []Highlight, uploaded map[string]bool) []pendingItem {
 				SourceType: "kobo_nickel_sync", Category: "books", HighlightedAt: parseDate(h.Created),
 			}
 			if part == 0 {
-				value.Note = combineChapterNote(h.Chapter, h.Note)
+				value.Note = locationNote(h)
 			}
 			if h.Position > 0 {
 				value.LocationType = "order"
@@ -383,14 +386,24 @@ func loadState(path string) (stateFile, error) {
 	if err != nil {
 		return s, err
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return s, fmt.Errorf("read sync state: %w", err)
+	}
+	if fields["version"] == nil || fields["uploaded"] == nil || string(fields["uploaded"]) == "null" {
+		return s, errors.New("sync history is incomplete; restore a backup instead of resetting it")
+	}
 	if err := json.Unmarshal(data, &s); err != nil {
 		return s, fmt.Errorf("read sync state: %w", err)
 	}
-	if s.Version != 1 {
+	if s.Version != 1 && s.Version != 2 {
 		return s, fmt.Errorf("unsupported sync state version %d", s.Version)
 	}
 	if s.Uploaded == nil {
 		s.Uploaded = make(map[string]bool)
+	}
+	if s.Records == nil {
+		s.Records = make(map[string]syncRecord)
 	}
 	return s, nil
 }
@@ -400,15 +413,7 @@ func saveState(path string, s stateFile) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicWrite(path, b)
 }
 
 func newHTTPClient() (*http.Client, error) {
@@ -425,105 +430,5 @@ func newHTTPClient() (*http.Client, error) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
-	return &http.Client{Timeout: 45 * time.Second, Transport: transport}, nil
-}
-
-func postBatch(client *http.Client, url, token string, batch []pendingItem) error {
-	highlights := make([]ReadwiseHighlight, len(batch))
-	for i, p := range batch {
-		highlights[i] = p.value
-	}
-	body, err := json.Marshal(struct {
-		Highlights []ReadwiseHighlight `json:"highlights"`
-	}{highlights})
-	if err != nil {
-		return err
-	}
-	for attempt := 0; attempt < 3; attempt++ {
-		request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			return err
-		}
-		request.Header.Set("Authorization", "Token "+token)
-		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", "KoboReadwiseSync/1.2")
-		response, err := client.Do(request)
-		if err != nil {
-			if attempt == 2 {
-				return fmt.Errorf("network or TLS error: %w", err)
-			}
-			time.Sleep(time.Duration(attempt+1) * time.Second)
-			continue
-		}
-		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		response.Body.Close()
-		if response.StatusCode == http.StatusOK || response.StatusCode == http.StatusCreated {
-			return nil
-		}
-		if response.StatusCode == 429 || response.StatusCode >= 500 {
-			if attempt < 2 {
-				wait := time.Duration(attempt+1) * time.Second
-				if n, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && n > 0 && n <= 30 {
-					wait = time.Duration(n) * time.Second
-				}
-				time.Sleep(wait)
-				continue
-			}
-		}
-		// Do not persist raw Readwise response: can contain user content.
-		_ = responseBody
-		return fmt.Errorf("Readwise returned HTTP %d (check token, input limits, or service status)", response.StatusCode)
-	}
-	return errors.New("Readwise upload failed after retries")
-}
-
-func sync(dir, dbpath, url string, client *http.Client) (string, error) {
-	tokenBytes, err := os.ReadFile(filepath.Join(dir, "token.txt"))
-	if err != nil {
-		return "", errors.New("Readwise token missing: create .adds/readwise-sync/token.txt")
-	}
-	token := strings.TrimSpace(string(tokenBytes))
-	if token == "" || strings.Contains(strings.ToLower(token), "paste") || strings.ContainsAny(token, " \t\r\n") {
-		return "", errors.New("token.txt is empty or invalid")
-	}
-	s, stateErr := loadState(filepath.Join(dir, "state.json"))
-	if stateErr != nil {
-		return "", stateErr
-	}
-	items, err := loadHighlights(dbpath)
-	if err != nil {
-		return "", err
-	}
-	pending := makePending(items, s.Uploaded)
-	if client == nil {
-		client, err = newHTTPClient()
-		if err != nil {
-			return "", err
-		}
-	}
-	uploadedCount := 0
-	for start := 0; start < len(pending); start += batchSize {
-		end := start + batchSize
-		if end > len(pending) {
-			end = len(pending)
-		}
-		batch := pending[start:end]
-		if err := postBatch(client, url, token, batch); err != nil {
-			return "", fmt.Errorf("uploaded %d of %d new highlights before error: %w", uploadedCount, len(pending), err)
-		}
-		for _, h := range batch {
-			s.Uploaded[h.key] = true
-		}
-		if err := saveState(filepath.Join(dir, "state.json"), s); err != nil {
-			return "", fmt.Errorf("Readwise accepted batch, but failed to save sync state: %w", err)
-		}
-		uploadedCount += len(batch)
-	}
-	coverStatus, err := syncCovers(client, dbpath, url, token, items)
-	summary := fmt.Sprintf("Synced %d new highlights. Kobo highlights scanned: %d. Covers: %d uploaded, %d already present, %d unmatched, %d ambiguous.",
-		uploadedCount, len(items), coverStatus.uploaded, coverStatus.existing, coverStatus.unmatched, coverStatus.ambiguous)
-	if err != nil {
-		return "", fmt.Errorf("%s Cover sync failed: %w", summary, err)
-	}
-	return summary, nil
+	return &http.Client{Timeout: 45 * time.Second, Transport: &pacedTransport{base: transport, lists: map[string]time.Time{}}}, nil
 }

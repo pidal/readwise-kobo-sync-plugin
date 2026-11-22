@@ -34,7 +34,7 @@ func TestChapterExtractionAndLocation(t *testing.T) {
 		if p.value.LocationType != "order" || p.value.Location == 0 {
 			t.Fatalf("wrong Readwise position: %+v", p)
 		}
-		if !strings.HasPrefix(p.value.Note, "Chapter: ") {
+		if !strings.Contains(p.value.Note, "Chapter: ") {
 			t.Fatalf("missing chapter: %+v", p.value)
 		}
 		if p.value.Text == "Second chapter text" && !strings.Contains(p.value.Note, "Original note") {

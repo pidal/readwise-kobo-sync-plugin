@@ -5,7 +5,6 @@ case "$(uname -m)" in
     aarch64*|arm64*) BIN="$BASE/readwise-sync-arm64" ;;
     *) BIN="$BASE/readwise-sync-arm" ;;
 esac
-printf 'Chapter backfill started. Check status when finished.\n' > "$BASE/last-result.txt"
 chmod +x "$BIN" 2>/dev/null || :
-"$BIN" -backfill-chapters > "$BASE/backfill.log" 2>&1
+"$BIN" -backfill-chapters >> "$BASE/backfill.log" 2>&1
 exit $?

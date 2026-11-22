@@ -310,7 +310,7 @@ func sendReadwiseJSON(client *http.Client, method, endpoint, token string, paylo
 			return err
 		}
 		req.Header.Set("Authorization", "Token "+token)
-		req.Header.Set("User-Agent", "KoboReadwiseSync/1.2")
+		req.Header.Set("User-Agent", "KoboReadwiseSync/1.3")
 		if payload != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}

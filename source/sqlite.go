@@ -102,6 +102,15 @@ func (r *sqliteReader) openWAL(path string) error {
 		f.Close()
 		return errors.New("unexpected SQLite WAL magic")
 	}
+	var checksumOrder binary.ByteOrder = binary.LittleEndian
+	if magic == 0x377f0683 {
+		checksumOrder = binary.BigEndian
+	}
+	c0, c1 := walChecksum(header[:24], checksumOrder, 0, 0)
+	if c0 != binary.BigEndian.Uint32(header[24:28]) || c1 != binary.BigEndian.Uint32(header[28:32]) {
+		f.Close()
+		return errors.New("invalid SQLite WAL header checksum; retry sync")
+	}
 	sz := int(binary.BigEndian.Uint32(header[8:12]))
 	if sz == 0 {
 		sz = 65536
@@ -121,6 +130,7 @@ func (r *sqliteReader) openWAL(path string) error {
 	}
 	var frames []walFrame
 	lastCommit := 0
+	pageData := make([]byte, r.pageSize)
 	for offset := int64(32); offset+stride <= st.Size(); offset += stride {
 		var fh [24]byte
 		if _, err = f.ReadAt(fh[:], offset); err != nil {
@@ -132,6 +142,17 @@ func (r *sqliteReader) openWAL(path string) error {
 		pg := binary.BigEndian.Uint32(fh[:4])
 		if pg == 0 {
 			break
+		}
+		if _, err = f.ReadAt(pageData, offset+24); err != nil {
+			f.Close()
+			return err
+		}
+		c0, c1 = walChecksum(fh[:8], checksumOrder, c0, c1)
+		c0, c1 = walChecksum(pageData, checksumOrder, c0, c1)
+		if c0 != binary.BigEndian.Uint32(fh[16:20]) || c1 != binary.BigEndian.Uint32(fh[20:24]) {
+			// Could be an in-flight write; fail before sending any extracted data.
+			f.Close()
+			return errors.New("invalid SQLite WAL frame checksum; retry sync")
 		}
 		frames = append(frames, walFrame{p: pg, pos: offset + 24})
 		if commitPages := binary.BigEndian.Uint32(fh[4:8]); commitPages > 0 {
@@ -531,4 +552,12 @@ func parseColumns(ddl string) []string {
 		cols = append(cols, strings.ToLower(name))
 	}
 	return cols
+}
+
+func walChecksum(b []byte, order binary.ByteOrder, s0, s1 uint32) (uint32, uint32) {
+	for i := 0; i+8 <= len(b); i += 8 {
+		s0 += order.Uint32(b[i:i+4]) + s1
+		s1 += order.Uint32(b[i+4:i+8]) + s0
+	}
+	return s0, s1
 }

@@ -82,6 +82,15 @@ def run_test():
         assert ret.returncode==0,ret.stderr
         assert 'Found 2 Kobo highlights' in ret.stdout,ret.stdout
         # Go HTTPS requests are exercised with a local mock via Go tests below.
+        # A torn/corrupted WAL must fail before exporting potentially bad text.
+        wal = Path(str(db) + '-wal')
+        original = wal.read_bytes()
+        corrupt = bytearray(original)
+        corrupt[32 + 24 + 100] ^= 1
+        wal.write_bytes(corrupt)
+        ret = invoke('-db', db, '-dir', plugin, '-dry-run')
+        assert ret.returncode != 0 and 'checksum' in ret.stderr, ret.stderr
+        wal.write_bytes(original)
         con.close()
 
         con2=sqlite3.connect(db)
@@ -99,6 +108,6 @@ def run_test():
         ret=invoke('-db',manydb,'-dir',plugin,'-dry-run')
         assert ret.returncode==0,ret.stderr
         assert 'Found 2001 Kobo highlights' in ret.stdout,ret.stdout
-    print('PASS: SQLite main DB, WAL, hidden notes, overflow pages, interior B-tree pages')
+    print('PASS: SQLite main DB, WAL checksums, hidden notes, overflow pages, interior B-tree pages')
 
 if __name__=='__main__':run_test()

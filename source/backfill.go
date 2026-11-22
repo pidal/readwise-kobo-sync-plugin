@@ -20,9 +20,10 @@ import (
 )
 
 type existingHighlight struct {
-	ID   int64  `json:"id"`
-	Text string `json:"text"`
-	Note string `json:"note"`
+	ID           int64  `json:"id"`
+	Text         string `json:"text"`
+	Note         string `json:"note"`
+	LocationType string `json:"location_type"`
 }
 
 type backfillReport struct {
@@ -55,7 +56,12 @@ func loadBookHighlights(client *http.Client, baseURL, token string, id int64) ([
 }
 
 func hasChapterPrefix(s string) bool {
-	return strings.HasPrefix(strings.TrimSpace(s), "Chapter: ")
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "Chapter: ") {
+			return true
+		}
+	}
+	return false
 }
 
 func addChapterToExistingNote(chapter, existing string) string {
@@ -66,7 +72,11 @@ func addChapterToExistingNote(chapter, existing string) string {
 }
 
 func backfillChapters(dir, dbpath, highlightsURL string, client *http.Client) (string, error) {
-	tokenBytes, err := os.ReadFile(filepath.Join(dir, "token.txt"))
+	dataDir, err := prepareData(dir)
+	if err != nil {
+		return "", err
+	}
+	tokenBytes, err := os.ReadFile(filepath.Join(dataDir, "token.conf"))
 	if err != nil {
 		return "", errors.New("Readwise token missing")
 	}
@@ -74,7 +84,7 @@ func backfillChapters(dir, dbpath, highlightsURL string, client *http.Client) (s
 	if token == "" || strings.ContainsAny(token, " \t\r\n") || strings.Contains(strings.ToLower(token), "paste") {
 		return "", errors.New("invalid Readwise token")
 	}
-	state, err := loadState(filepath.Join(dir, "state.json"))
+	state, err := loadState(filepath.Join(dataDir, "sync-state.json"))
 	if err != nil {
 		return "", err
 	}

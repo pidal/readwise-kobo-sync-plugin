@@ -1,13 +1,9 @@
 package main
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 )
 
@@ -44,63 +40,47 @@ func TestPendingLongTextAndIds(t *testing.T) {
 
 func TestSyncPersistsOnlySuccessfulBatches(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "token.txt"), []byte("test-token\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "token.txt"), []byte("test-token"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	var count int32
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Token test-token" {
-			t.Error("wrong authorization")
-		}
-		if r.URL.Path != "/api/v2/highlights/" {
-			t.Error("wrong URL")
-		}
-		var body struct {
-			Highlights []ReadwiseHighlight `json:"highlights"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Error(err)
-		}
-		if len(body.Highlights) > 25 {
-			t.Error("batch too large")
-		}
-		if body.Highlights[0].Title != "Test Book" || body.Highlights[0].Note == "" {
-			t.Error("lost metadata or note")
-		}
-		n := atomic.AddInt32(&count, 1)
-		if n == 2 {
-			w.WriteHeader(401)
-		} else {
-			w.WriteHeader(200)
-			w.Write([]byte("[]"))
-		}
-	}))
-	defer fake.Close()
+	fake := newFakeReadwise(t)
+	defer fake.server.Close()
+	fake.failPost = 2
 	db := "../tests/fixtures/basic.sqlite"
-	// Batch 1 succeeds, batch 2 fails. Resuming sends only the remaining two batches.
-	_, err := sync(dir, db, fake.URL+"/api/v2/highlights/", fake.Client())
-	if err == nil || !strings.Contains(err.Error(), "uploaded 25 of 51") {
-		t.Fatalf("expected partial failure: %v", err)
+	_, err := sync(dir, db, fake.server.URL+"/api/v2/highlights/", fake.server.Client())
+	if err == nil {
+		t.Fatal("expected interrupted sync")
 	}
-	saved, err := loadState(filepath.Join(dir, "state.json"))
+	saved, err := loadState(filepath.Join(dir, "data", "sync-state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(saved.Uploaded) != 25 {
-		t.Fatalf("want 25 persisted ids, got %d", len(saved.Uploaded))
+	if len(saved.Uploaded) != 1 {
+		t.Fatalf("expected one saved highlight: %+v", saved)
 	}
-	result, err := sync(dir, db, fake.URL+"/api/v2/highlights/", fake.Client())
+	fake.failPost = 0
+	result, err := sync(dir, db, fake.server.URL+"/api/v2/highlights/", fake.server.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result, "Synced 26 new highlights") {
+	if !strings.Contains(result, "Synced 50 new highlights") {
 		t.Fatal(result)
 	}
-	if _, err := sync(dir, db, fake.URL+"/api/v2/highlights/", fake.Client()); err != nil {
+	calls := fake.posts
+	if _, err := sync(dir, db, fake.server.URL+"/api/v2/highlights/", fake.server.Client()); err != nil {
 		t.Fatal(err)
 	}
-	if got := atomic.LoadInt32(&count); got != 4 {
-		t.Fatalf("expected 4 HTTP calls, got %d", got)
+	if fake.posts != calls || len(fake.items) != 51 {
+		t.Fatalf("duplicate uploads: calls=%d items=%d", fake.posts, len(fake.items))
+	}
+	saved, err = loadState(filepath.Join(dir, "data", "sync-state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range saved.Records {
+		if rec.ID == 0 || rec.BookID == 0 || rec.Fingerprint == "" {
+			t.Fatalf("missing identity: %+v", rec)
+		}
 	}
 }
 
