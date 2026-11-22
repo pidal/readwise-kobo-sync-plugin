@@ -5,3 +5,5 @@ menu_item:main:Readwise sync status:cmd_output:1000:/bin/sh /mnt/onboard/.adds/r
 menu_item:reader:Sync to Readwise:cmd_spawn:quiet:/bin/sh /mnt/onboard/.adds/readwise-sync/launch.sh
 chain_success:dbg_toast:Readwise sync started. Check status in the menu.
 menu_item:reader:Readwise sync status:cmd_output:1000:/bin/sh /mnt/onboard/.adds/readwise-sync/status.sh
+menu_item:main:Backfill Readwise chapters:cmd_spawn:quiet:/bin/sh /mnt/onboard/.adds/readwise-sync/backfill.sh
+chain_success:dbg_toast:Readwise chapter backfill started. Check status.

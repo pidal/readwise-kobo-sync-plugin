@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,14 +35,20 @@ const (
 )
 
 type Highlight struct {
-	ID      string
-	Volume  string
-	Text    string
-	Note    string
-	Created string
-	Title   string
-	Author  string
-	ImageID string
+	ID                string
+	Volume            string
+	Text              string
+	Note              string
+	Created           string
+	Title             string
+	Author            string
+	ImageID           string
+	Chapter           string
+	ChapterIndex      int
+	ChapterIndexKnown bool
+	StartPath         string
+	StartOffset       int
+	Position          int // book-order ordinal: not a printed page
 }
 
 type ReadwiseHighlight struct {
@@ -52,6 +59,8 @@ type ReadwiseHighlight struct {
 	SourceType    string `json:"source_type"`
 	Category      string `json:"category"`
 	HighlightedAt string `json:"highlighted_at,omitempty"`
+	Location      int    `json:"location,omitempty"`
+	LocationType  string `json:"location_type,omitempty"`
 }
 
 type pendingItem struct {
@@ -69,6 +78,7 @@ func main() {
 	db := flag.String("db", defaultDB, "Kobo SQLite database path")
 	dry := flag.Bool("dry-run", false, "count highlights without uploading")
 	status := flag.Bool("status", false, "display last sync result")
+	backfill := flag.Bool("backfill-chapters", false, "opt-in chapter backfill of previously uploaded highlights")
 	flag.Parse()
 	if *status {
 		b, err := os.ReadFile(filepath.Join(*dir, "last-result.txt"))
@@ -97,7 +107,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer os.Remove(filepath.Join(*dir, ".lock"))
-	result, err := sync(*dir, *db, readwiseURL, nil)
+	var result string
+	var err error
+	if *backfill {
+		result, err = backfillChapters(*dir, *db, readwiseURL, nil)
+	} else {
+		result, err = sync(*dir, *db, readwiseURL, nil)
+	}
 	if err != nil {
 		result = "Sync failed: " + err.Error()
 		fmt.Fprintln(os.Stderr, result)
@@ -139,20 +155,30 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 	}
 	defer r.close()
 	type metadata struct{ title, author, imageID string }
+	type chapterData struct {
+		title    string
+		index    int
+		hasIndex bool
+	}
 	books := make(map[string]metadata)
+	chapters := make(map[string]chapterData)
 	err = r.rows("content", func(row map[string]any) error {
 		id := str(row["contentid"])
 		if id == "" {
 			return nil
 		}
 		typ := str(row["contenttype"])
-		if typ != "" && typ != "6" {
-			return nil
-		}
 		title := strings.TrimSpace(str(row["title"]))
-		author := strings.TrimSpace(str(row["attribution"]))
-		if title != "" {
-			books[id] = metadata{title, author, strings.TrimSpace(str(row["imageid"]))}
+		if typ == "6" {
+			author := strings.TrimSpace(str(row["attribution"]))
+			if title != "" {
+				books[id] = metadata{title, author, strings.TrimSpace(str(row["imageid"]))}
+			}
+		} else {
+			// Chapter rows are generally ContentType=9. Use the exact
+			// Bookmark.ContentID join; never infer a chapter from a filename.
+			index, idxErr := strconv.Atoi(strings.TrimSpace(str(row["volumeindex"])))
+			chapters[id] = chapterData{title: title, index: index, hasIndex: idxErr == nil}
 		}
 		return nil
 	})
@@ -178,14 +204,58 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 		if book.title == "" {
 			book.title = filenameTitle(vol)
 		}
+		chapter := chapters[str(row["contentid"])]
+		// A few firmware versions use a chapter row whose title repeats
+		// the book title; avoid presenting that as a chapter.
+		if strings.EqualFold(strings.TrimSpace(chapter.title), strings.TrimSpace(book.title)) {
+			chapter.title = ""
+		}
+		startOffset, _ := strconv.Atoi(strings.TrimSpace(str(row["startoffset"])))
 		highlights = append(highlights, Highlight{
 			ID: id, Volume: vol, Text: text, Note: strings.TrimSpace(str(row["annotation"])),
 			Created: str(row["datecreated"]), Title: book.title, Author: book.author, ImageID: book.imageID,
+			Chapter: chapter.title, ChapterIndex: chapter.index, ChapterIndexKnown: chapter.hasIndex,
+			StartPath: str(row["startcontainerpath"]), StartOffset: startOffset,
 		})
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("read Kobo bookmarks: %w", err)
+	}
+	// Kobo does not provide reliable physical page numbers for EPUBs.
+	// If all chapter indices and paths are available for a book, a
+	// numeric per-book ordinal can be sent to Readwise as "order".
+	byVolume := make(map[string][]int)
+	for i := range highlights {
+		byVolume[highlights[i].Volume] = append(byVolume[highlights[i].Volume], i)
+	}
+	for _, inds := range byVolume {
+		ordered := true
+		for _, i := range inds {
+			if !highlights[i].ChapterIndexKnown || highlights[i].StartPath == "" {
+				ordered = false
+				break
+			}
+		}
+		if !ordered {
+			continue
+		}
+		sort.SliceStable(inds, func(a, b int) bool {
+			x, y := highlights[inds[a]], highlights[inds[b]]
+			if x.ChapterIndex != y.ChapterIndex {
+				return x.ChapterIndex < y.ChapterIndex
+			}
+			if cmp := compareKoboPath(x.StartPath, y.StartPath); cmp != 0 {
+				return cmp < 0
+			}
+			if x.StartOffset != y.StartOffset {
+				return x.StartOffset < y.StartOffset
+			}
+			return x.ID < y.ID
+		})
+		for order, i := range inds {
+			highlights[i].Position = order + 1
+		}
 	}
 	sort.Slice(highlights, func(i, j int) bool {
 		if highlights[i].Volume == highlights[j].Volume {
@@ -194,6 +264,28 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 		return highlights[i].Volume < highlights[j].Volume
 	})
 	return highlights, nil
+}
+
+var pathNumber = regexp.MustCompile(`[0-9]+`)
+
+// Compare CFI and KEPUB span paths by numeric components ("2" < "10").
+// If paths are not comparable, lexical fallback is deterministic but does not
+// claim to be a printed page number.
+func compareKoboPath(a, b string) int {
+	pa, pb := pathNumber.FindAllString(a, -1), pathNumber.FindAllString(b, -1)
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		na, ea := strconv.ParseUint(pa[i], 10, 64)
+		nb, eb := strconv.ParseUint(pb[i], 10, 64)
+		if ea == nil && eb == nil {
+			if na < nb {
+				return -1
+			}
+			if na > nb {
+				return 1
+			}
+		}
+	}
+	return strings.Compare(a, b)
 }
 
 func filenameTitle(volume string) string {
@@ -231,6 +323,25 @@ func truncateRunes(s string, limit int) string {
 	return string([]rune(s)[:limit])
 }
 
+// Readwise has no dedicated chapter field. The chapter is added to the note,
+// without altering the highlight text or removing the reader's original note.
+func combineChapterNote(chapter, personal string) string {
+	chapter = strings.TrimSpace(chapter)
+	personal = strings.TrimSpace(personal)
+	var note string
+	if chapter == "" {
+		note = personal
+	} else if personal == "" {
+		note = "Chapter: " + chapter
+	} else {
+		note = "Chapter: " + chapter + "\n\n" + personal
+	}
+	if len([]rune(note)) > 8191 {
+		note = string([]rune(note)[:8150]) + " [Note truncated]"
+	}
+	return note
+}
+
 func makePending(items []Highlight, uploaded map[string]bool) []pendingItem {
 	var pending []pendingItem
 	for _, h := range items {
@@ -251,12 +362,11 @@ func makePending(items []Highlight, uploaded map[string]bool) []pendingItem {
 				SourceType: "kobo_nickel_sync", Category: "books", HighlightedAt: parseDate(h.Created),
 			}
 			if part == 0 {
-				note := []rune(h.Note)
-				if len(note) > 8191 {
-					value.Note = string(note[:8138]) + " [Note truncated to Readwise limit]"
-				} else {
-					value.Note = h.Note
-				}
+				value.Note = combineChapterNote(h.Chapter, h.Note)
+			}
+			if h.Position > 0 {
+				value.LocationType = "order"
+				value.Location = h.Position
 			}
 			pending = append(pending, pendingItem{key, value})
 		}
@@ -336,7 +446,7 @@ func postBatch(client *http.Client, url, token string, batch []pendingItem) erro
 		}
 		request.Header.Set("Authorization", "Token "+token)
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("User-Agent", "KoboReadwiseSync/1.1")
+		request.Header.Set("User-Agent", "KoboReadwiseSync/1.2")
 		response, err := client.Do(request)
 		if err != nil {
 			if attempt == 2 {
