@@ -39,7 +39,34 @@ Put only the token in it: no quotes or `Token ` prefix. `.conf` is the filename
 extension; its contents are still plain text.
 
 Safely eject, restart Kobo, connect Wi-Fi, then use **NickelMenu → Sync to Readwise**.
-Use **Readwise sync status** to see results.
+Quick syncs show their result directly. For longer runs, use **Readwise status**
+to check progress. Both actions are available from Home, the reader, and My Books.
+
+## Checking sync status
+
+Choose **Sync to Readwise**. The menu waits up to about five seconds and shows
+one compact result dialog. A longer sync continues in the background: the dialog
+shows a progress snapshot instead, and **Readwise status** shows fresh progress
+when selected again. It does not automatically refresh an already open dialog.
+Do not start another sync to check progress; the status action is read-only.
+
+Typical completed result:
+
+```text
+23 Nov 10:42
+Sync complete
+New: 12  Updated: 3
+Unchanged: 85
+Needs review: 0
+Covers added: 2
+Covers present: 8
+Covers skipped: 0
+```
+
+Status lines are limited to 32 characters, including older status files.
+Errors show a short suggestion; detailed diagnostics remain in `run.log`.
+NickelMenu limits command dialogs to under ten seconds, so long syncs cannot
+hold the menu open until completion. No extra notification plugin is required.
 
 ## Personal files: KEEP THESE WHEN UPGRADING
 
@@ -87,13 +114,12 @@ rerunning the installer restores it.
 
 ## Locations
 
-Each highlight includes the information Kobo actually exposes:
-
-- A native Readwise numeric **order** location when all chapter indices and
-  start paths for that book's current highlights are available.
-- A **Kobo location** line in the first highlight part's note: chapter index
-  (Kobo's raw index), start-container path/CFI/span, and character offset, when
-  present. Chapter title and the personal note are also retained.
+Highlights use the native Readwise numeric **order** field when Kobo provides
+chapter indices and start paths for all current highlights in a book.
+Chapter names, container paths and Kobo location labels are never added to notes.
+Notes contain only personal annotations from Kobo, on both initial upload and
+subsequent updates. Editing or clearing a personal note on Kobo updates the
+corresponding Readwise note.
 
 These are reading positions, **not printed page numbers or Kindle locations**.
 The numeric order is the rank among the book's current highlights, not a fixed
@@ -104,18 +130,18 @@ After an interrupted run, retry to finish those updates.
 For highlights adopted from an existing Readwise book, genuine page/offset
 location types are preserved. Readwise documents changing the numeric location
 but not its type with PATCH. If Kobo later lacks sufficient ordering data, the
-previous native number is retained; available Kobo path details remain in the
-note. The plugin does not invent missing page numbers. Books without chapter
+previous native number is retained. The plugin does not invent missing page numbers. Books without chapter
 rows or paths may have incomplete location metadata.
 
 ## One-way sync and recovery
 
 - Uploads new highlights; records the returned Readwise highlight and book IDs.
   Each CREATE contains one highlight so an ID is never inferred from array order.
-- Updates an already mapped highlight's text, note and available order when
-  Kobo changes. Kobo is authoritative for those fields on update. Clearing a
-  Kobo note clears its personal-note portion in Readwise. Readwise-only note
-  edits can be overwritten by a later Kobo update; nothing is imported to Kobo.
+- Updates an already mapped highlight's text, personal note and available order
+  when Kobo changes. Kobo is authoritative: editing or clearing its personal
+  note updates the corresponding Readwise note. Readwise-only note edits may
+  be overwritten by a later Kobo update. Chapter and location metadata are
+  never added to notes.
 - Keeps fingerprints to skip unchanged highlights. It does not continuously
   enforce Kobo content against edits made only in Readwise.
 - Saves upload intent **before** sending, then saves IDs and fingerprints after
@@ -159,9 +185,11 @@ Kobo storage and Readwise; recovery uses saved intent and conservative matching.
   unambiguous title/author match. Images are limited to 4 MB.
 - HTTPS uses TLS 1.2+ and OS/bundled CA certificates. All network operations go
   to the authenticated Readwise API. Kobo's clock must be approximately correct.
-- **Backfill Readwise chapters** remains an optional menu action that adds
-  chapters to uniquely matched previously uploaded highlights while preserving
-  existing notes. Normal v1.3 sync already updates mapped highlights' metadata.
+- Chapter backfill is disabled and removed from the menu. Its legacy launcher
+  remains a harmless compatibility stub. Metadata already added to Readwise
+  notes by an older release is replaced with the Kobo personal note when that
+  highlight is next updated by sync.
+
 
 ## Troubleshooting
 
@@ -185,7 +213,7 @@ go test ./...
 go build -o /tmp/kobo-readwise-sync .
 cd ..
 python3 tests/test_integration.py /tmp/kobo-readwise-sync
-python3 -m unittest discover -s tests -p 'test_install.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 Cross-compile with `source/build.sh`; it tests first and creates both static

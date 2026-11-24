@@ -86,7 +86,7 @@ func newFakeReadwise(t *testing.T) *fakeReadwise {
 			}
 			var body struct {
 				Text         string
-				Note         string
+				Note         *string
 				Location     *int
 				LocationType string `json:"location_type"`
 			}
@@ -94,7 +94,12 @@ func newFakeReadwise(t *testing.T) *fakeReadwise {
 				t.Error(err)
 			}
 			h.Text = body.Text
-			h.Note = body.Note
+			if body.Note != nil {
+				h.Note = *body.Note
+				if strings.Contains(h.Note, "Kobo location:") || strings.Contains(h.Note, "Chapter:") {
+					t.Error("metadata leaked into note")
+				}
+			}
 			if body.Location != nil {
 				h.Location = *body.Location
 			}
@@ -119,7 +124,7 @@ func runItems(t *testing.T, dir string, f *fakeReadwise, hs []Highlight) (string
 	if err != nil {
 		t.Fatal(err)
 	}
-	return syncItems(path, filepath.Join(dir, "missing.sqlite"), f.server.URL+"/api/v2/highlights/", "test-token", state, hs, f.server.Client())
+	return syncItems(path, filepath.Join(dir, "missing.sqlite"), f.server.URL+"/api/v2/highlights/", "test-token", state, hs, f.server.Client(), nil)
 }
 func TestOneWayEditsLocationsAndResume(t *testing.T) {
 	f := newFakeReadwise(t)
@@ -133,7 +138,7 @@ func TestOneWayEditsLocationsAndResume(t *testing.T) {
 	for k := range f.items {
 		id = k
 	}
-	if f.items[id].Location != 1 || !strings.Contains(f.items[id].Note, "Kobo location:") {
+	if f.items[id].Location != 1 || f.items[id].Note != "My note" {
 		t.Fatal(f.items)
 	}
 	hs[0].Text = "Edited passage"
@@ -142,7 +147,7 @@ func TestOneWayEditsLocationsAndResume(t *testing.T) {
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.posts != 1 || f.patches != 1 || f.items[id].Location != 2 || f.items[id].Text != "Edited passage" || strings.Contains(f.items[id].Note, "My note") {
+	if f.posts != 1 || f.patches != 1 || f.items[id].Location != 2 || f.items[id].Text != "Edited passage" || f.items[id].Note != "" {
 		t.Fatal("edit did not update original highlight")
 	}
 	hs[0].StartPath = ""
@@ -152,7 +157,7 @@ func TestOneWayEditsLocationsAndResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	if f.items[id].Note != "" || f.items[id].Location != 2 || f.items[id].LocationType != "order" {
-		t.Fatal("note was not cleared or existing order was lost")
+		t.Fatal("personal note or existing order was changed")
 	}
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
@@ -254,7 +259,7 @@ func TestAdoptedPageLocationIsPreserved(t *testing.T) {
 	if _, err := runItems(t, t.TempDir(), f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.items[99].Location != 42 || f.items[99].LocationType != "page" || !strings.Contains(f.items[99].Note, "Kobo note") {
+	if f.items[99].Location != 42 || f.items[99].LocationType != "page" || f.items[99].Note != "Kobo note" {
 		t.Fatal("adopted page location overwritten")
 	}
 }
@@ -270,11 +275,33 @@ func TestRemovedHighlightsAreReportedAndRetained(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.items) != 1 || !strings.Contains(summary, "1 need review") {
+	if len(f.items) != 1 || !strings.Contains(summary, "Needs review: 1") {
 		t.Fatal(summary)
 	}
 	report, err := os.ReadFile(filepath.Join(dir, "sync-review.log"))
 	if err != nil || !strings.Contains(string(report), "retained") {
 		t.Fatal("missing removal report")
+	}
+}
+
+func TestPersonalNoteOnlyChangesSync(t *testing.T) {
+	f := newFakeReadwise(t)
+	defer f.server.Close()
+	dir := t.TempDir()
+	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Text", Note: "Personal", Chapter: "Chapter", StartPath: "/2/4"}}
+	if _, err := runItems(t, dir, f, hs); err != nil {
+		t.Fatal(err)
+	}
+	hs[0].Note = "Edited on Kobo"
+	if _, err := runItems(t, dir, f, hs); err != nil {
+		t.Fatal(err)
+	}
+	if f.posts != 1 || f.patches != 1 {
+		t.Fatal("personal note change did not update existing highlight")
+	}
+	for _, h := range f.items {
+		if h.Note != "Edited on Kobo" {
+			t.Fatal("personal note modified")
+		}
 	}
 }

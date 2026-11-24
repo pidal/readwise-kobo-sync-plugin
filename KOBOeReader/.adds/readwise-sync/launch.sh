@@ -1,22 +1,36 @@
 #!/bin/sh
-# NickelMenu action: start the prebuilt static binary for this Kobo CPU.
-BASE=/mnt/onboard/.adds/readwise-sync
+BASE=${READWISE_SYNC_DIR:-/mnt/onboard/.adds/readwise-sync}
+
+# NickelMenu commands must return within 10 seconds. Let quick syncs finish
+# and show their result immediately; leave slow syncs running in background.
+if [ "${1:-}" = '--menu' ]; then
+    if [ ! -d "$BASE/.lock" ]; then
+        /bin/sh "$0" </dev/null >/dev/null 2>&1 &
+        SYNC_PID=$!
+        CHECKS=0
+        while kill -0 "$SYNC_PID" 2>/dev/null && [ "$CHECKS" -lt 5 ]; do
+            sleep 1
+            CHECKS=$((CHECKS + 1))
+        done
+    fi
+    /bin/sh "$BASE/status.sh"
+    exit 0
+fi
+
 case "$(uname -m)" in
     aarch64*|arm64*) BIN="$BASE/readwise-sync-arm64" ;;
-    arm*|*) BIN="$BASE/readwise-sync-arm" ;;
+    *) BIN="$BASE/readwise-sync-arm" ;;
 esac
 if [ ! -f "$BIN" ]; then
-    printf 'Sync could not start: executable missing. Reinstall the plugin.\n' > "$BASE/last-result.log"
+    printf 'Sync failed\nExecutable missing.\nReinstall the plugin.\n' > "$BASE/last-result.log"
     exit 1
 fi
 chmod +x "$BIN" 2>/dev/null || :
-"$BIN" >> "$BASE/run.log" 2>&1
+"$BIN" -dir "$BASE" >> "$BASE/run.log" 2>&1
 RC=$?
-if [ "$RC" -ne 0 ]; then
-    # The Go program normally writes a detailed failure status itself.
-    # Also handle binary startup failures, such as incompatible firmware.
-    if ! grep -q 'Sync failed:' "$BASE/last-result.log" 2>/dev/null; then
-        printf 'Readwise sync failed to start/finish (exit %s). See run.log.\n' "$RC" > "$BASE/last-result.log"
+if [ "$RC" -ne 0 ] && [ ! -d "$BASE/.lock" ]; then
+    if ! grep -q '^Sync failed' "$BASE/last-result.log" 2>/dev/null; then
+        printf 'Sync failed\nCould not finish (exit %s).\nDetails: run.log\n' "$RC" > "$BASE/last-result.log"
     fi
 fi
 exit "$RC"

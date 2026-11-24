@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type syncRecord struct {
@@ -27,25 +28,6 @@ func fingerprint(v ReadwiseHighlight) string {
 	b, _ := json.Marshal(v)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
-}
-
-func locationNote(h Highlight) string {
-	note := combineChapterNote(h.Chapter, h.Note)
-	var position string
-	if h.StartPath != "" {
-		position = fmt.Sprintf("Kobo location: %s; offset %d", h.StartPath, h.StartOffset)
-		if h.ChapterIndexKnown {
-			position = fmt.Sprintf("Kobo location: chapter index %d; %s; offset %d", h.ChapterIndex, h.StartPath, h.StartOffset)
-		}
-	} else if h.Position > 0 {
-		position = fmt.Sprintf("Kobo highlight order: %d", h.Position)
-	}
-	if position == "" {
-		return note
-	}
-	position = truncateRunes(position, 2000)
-	// Keep the location even when the personal note reaches the API limit.
-	return position + "\n\n" + truncateRunes(note, 8191-len([]rune(position))-2)
 }
 
 func apiBase(endpoint string) (string, error) {
@@ -137,10 +119,10 @@ func sync(dir, dbpath, endpoint string, client *http.Client) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return syncItems(statePath, dbpath, endpoint, token, state, items, client)
+	return syncItems(statePath, dbpath, endpoint, token, state, items, client, func(message string) { writeStatus(dir, message) })
 }
 
-func syncItems(statePath, dbpath, endpoint, token string, state stateFile, items []Highlight, client *http.Client) (string, error) {
+func syncItems(statePath, dbpath, endpoint, token string, state stateFile, items []Highlight, client *http.Client, report func(string)) (string, error) {
 	var err error
 	if state.Records == nil {
 		state.Records = map[string]syncRecord{}
@@ -188,7 +170,12 @@ func syncItems(statePath, dbpath, endpoint, token string, state stateFile, items
 		counts[keyBook(p.value.Title, p.value.Author)+"\x00"+p.value.Text]++
 		currentKeys[p.key] = true
 	}
-	for _, p := range all {
+	lastProgress := time.Time{}
+	for index, p := range all {
+		if report != nil && time.Since(lastProgress) >= time.Second {
+			report(fmt.Sprintf("Syncing...\nHighlights: %d / %d\nNew: %d  Updated: %d\nCheck status again shortly.", index, len(all), created, updated))
+			lastProgress = time.Now()
+		}
 		if counts[keyBook(p.value.Title, p.value.Author)+"\x00"+p.value.Text] > 1 {
 			unresolved++
 			review = append(review, p.key+": identical local text has multiple owners")
@@ -316,8 +303,12 @@ func syncItems(statePath, dbpath, endpoint, token string, state stateFile, items
 	if err := atomicWrite(filepath.Join(filepath.Dir(statePath), "sync-review.log"), []byte(strings.Join(review, "\n"))); err != nil {
 		return fail(err)
 	}
+	if report != nil {
+		report(fmt.Sprintf("Syncing...\nHighlights checked: %d\nChecking book covers.", len(all)))
+	}
 	covers, err := syncCovers(client, dbpath, endpoint, token, items)
-	summary := fmt.Sprintf("Synced %d new highlights, %d updated, %d unchanged, %d need review. Kobo highlights scanned: %d. Covers: %d uploaded, %d already present, %d unmatched, %d ambiguous.", created, updated, unchanged, unresolved, len(items), covers.uploaded, covers.existing, covers.unmatched, covers.ambiguous)
+	summary := fmt.Sprintf("Sync complete\nNew: %d  Updated: %d\nUnchanged: %d\nNeeds review: %d\nCovers added: %d\nCovers present: %d\nCovers skipped: %d", created, updated, unchanged, unresolved, covers.uploaded, covers.existing, covers.unmatched+covers.ambiguous)
+
 	if err != nil {
 		return "", fmt.Errorf("%s Cover sync failed: %w", summary, err)
 	}

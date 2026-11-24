@@ -63,7 +63,7 @@ func TestSyncPersistsOnlySuccessfulBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result, "Synced 50 new highlights") {
+	if !strings.Contains(result, "New: 50") {
 		t.Fatal(result)
 	}
 	calls := fake.posts

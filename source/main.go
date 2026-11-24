@@ -84,7 +84,7 @@ func main() {
 			fmt.Println("Not synced yet.")
 			return
 		}
-		fmt.Print(string(b))
+		fmt.Println(wrapStatus(strings.TrimSpace(string(b)), 32))
 		return
 	}
 	if err := os.MkdirAll(*dir, 0700); err != nil {
@@ -105,6 +105,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer os.Remove(filepath.Join(*dir, ".lock"))
+	writeStatus(*dir, "Syncing...\nReading Kobo highlights.")
 	var result string
 	var err error
 	if *backfill {
@@ -118,7 +119,11 @@ func main() {
 	} else {
 		fmt.Println(result)
 	}
-	writeStatus(*dir, result)
+	if err != nil {
+		writeStatus(*dir, statusFailure(err))
+	} else {
+		writeStatus(*dir, result)
+	}
 	if err != nil {
 		os.Remove(filepath.Join(*dir, ".lock"))
 		os.Exit(1)
@@ -136,8 +141,8 @@ func acquireLock(dir string) error {
 }
 
 func writeStatus(dir, summary string) {
-	now := time.Now().Format("2006-01-02 15:04:05")
-	_ = os.WriteFile(filepath.Join(dir, "last-result.log"), []byte(now+"\n"+summary+"\n"), 0600)
+	now := time.Now().Format("02 Jan 15:04")
+	_ = atomicWrite(filepath.Join(dir, "last-result.log"), []byte(now+"\n"+wrapStatus(summary, 32)+"\n"))
 }
 
 func loadHighlights(dbpath string) ([]Highlight, error) {
@@ -326,21 +331,10 @@ func truncateRunes(s string, limit int) string {
 	return string([]rune(s)[:limit])
 }
 
-// Readwise has no dedicated chapter field. The chapter is added to the note,
-// without altering the highlight text or removing the reader's original note.
-func combineChapterNote(chapter, personal string) string {
-	chapter = strings.TrimSpace(chapter)
-	personal = strings.TrimSpace(personal)
-	var note string
-	if chapter == "" {
-		note = personal
-	} else if personal == "" {
-		note = "Chapter: " + chapter
-	} else {
-		note = "Chapter: " + chapter + "\n\n" + personal
-	}
+// Only personal annotations belong in Readwise notes.
+func personalNote(note string) string {
 	if len([]rune(note)) > 8191 {
-		note = string([]rune(note)[:8150]) + " [Note truncated]"
+		return string([]rune(note)[:8150]) + " [Note truncated]"
 	}
 	return note
 }
@@ -365,7 +359,7 @@ func makePending(items []Highlight, uploaded map[string]bool) []pendingItem {
 				SourceType: "kobo_nickel_sync", Category: "books", HighlightedAt: parseDate(h.Created),
 			}
 			if part == 0 {
-				value.Note = locationNote(h)
+				value.Note = personalNote(h.Note)
 			}
 			if h.Position > 0 {
 				value.LocationType = "order"
