@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install/upgrade a mounted Kobo, preserving personal data and settings."""
+"""Install Kobo Readwise Sync onto a mounted Kobo."""
 import re
 import shutil
 import sys
@@ -7,34 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PAYLOAD = ROOT / 'KOBOeReader' / '.adds'
-# Explicit allowlist: personal data can never accidentally enter an upgrade.
-PLUGIN_FILES = ('launch.sh', 'status.sh', 'backfill.sh',
+# Install program files only; credentials and history are kept separately.
+PLUGIN_FILES = ('launch.sh', 'status.sh',
                 'readwise-sync-arm', 'readwise-sync-arm64')
-
-
-def migrate_data(plugin):
-    data = plugin / 'data'
-    data.mkdir(parents=True, exist_ok=True)
-    pairs = [('token.txt', 'token.conf'), ('state.json', 'sync-state.json')]
-    # Validate all conflicts before moving anything.
-    for old_name, new_name in pairs:
-        old, new = plugin / old_name, data / new_name
-        if old.exists() and new.exists() and old.read_bytes() != new.read_bytes():
-            raise ValueError(f'{old} and {new} differ. Back up and resolve before upgrading.')
-    for old_name, new_name in pairs:
-        old, new = plugin / old_name, data / new_name
-        if old.exists():
-            if new.exists():
-                old.unlink()  # identical duplicate only
-            else:
-                old.rename(new)
-    old_status = plugin / 'last-result.txt'
-    if old_status.exists():
-        new_status = plugin / 'last-result.log'
-        if not new_status.exists():
-            old_status.rename(new_status)
-        else:
-            old_status.rename(data / 'legacy-last-result.log')
 
 
 def exclude_plugin(device):
@@ -89,37 +64,15 @@ def install(device):
         if not src.is_file():
             raise ValueError(f'Bundled file missing: {src}. Build release binaries first.')
     plugin = device / '.adds' / 'readwise-sync'
-    # Back up all personal files before migration; backups are outside payload.
-    if plugin.exists():
-        backup_root = device / '.adds' / 'readwise-sync-backups'
-        backup_root.mkdir(parents=True, exist_ok=True)
-        import tempfile
-        backup = Path(tempfile.mkdtemp(prefix='upgrade-', dir=backup_root))
-        for name in ('data', 'token.txt', 'state.json', 'last-result.txt'):
-            src = plugin / name
-            if src.is_dir():
-                shutil.copytree(src, backup / name)
-            elif src.is_file():
-                shutil.copy2(src, backup / name)
-        # Old token backups must not become books either.
-        if (backup / 'token.txt').exists():
-            (backup / 'token.txt').rename(backup / 'token.conf')
-        if (backup / 'last-result.txt').exists():
-            (backup / 'last-result.txt').rename(backup / 'last-result.log')
-        print('Personal data backed up:', backup.relative_to(device))
-    migrate_data(plugin)
+    (plugin / 'data').mkdir(parents=True, exist_ok=True)
     exclude_plugin(device)
     for src, relative in sources:
         dst = device / '.adds' / relative
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         print('Installed', dst.relative_to(device))
-    print('\nInstalled. KEEP .adds/readwise-sync/data/ when upgrading:')
-    print('  token.conf       = private Readwise token (plain UTF-8, token only)')
-    print('  sync-state.json  = sync history, Readwise IDs and recovery data')
-    print('The data/ folder is never shipped or overwritten by the installer.')
-    print('Plugin folder excluded from Kobo book scanning; original settings backed up.')
-    print('Safely eject, restart Kobo, enable Wi-Fi, then use Sync to Readwise.')
+    print('Installed Kobo Readwise Sync.')
+    return plugin / 'data' / 'token.conf'
 
 
 def main():
@@ -127,8 +80,20 @@ def main():
         print('Usage: python3 install.py /path/to/KOBOeReader')
         return 0 if len(sys.argv) == 2 else 2
     try:
-        install(Path(sys.argv[1]).expanduser().resolve())
-    except (ValueError, OSError) as exc:
+        token_path = install(Path(sys.argv[1]).expanduser().resolve())
+        if not token_path.exists():
+            from getpass import getpass
+            print('Get your token from https://readwise.io/access_token')
+            token = getpass('Readwise token (input hidden): ').strip()
+            if not token or any(c.isspace() for c in token) or 'paste' in token.lower():
+                raise ValueError('Enter only your Readwise token, without spaces.')
+            # Exclusive creation also protects an existing token on repeated installs.
+            with token_path.open('x', encoding='utf-8') as out:
+                out.write(token + '\n')
+            token_path.chmod(0o600)
+        print('Safely eject and restart Kobo, then connect Wi-Fi.')
+        print('Choose NickelMenu > Sync to Readwise.')
+    except (ValueError, OSError, EOFError, KeyboardInterrupt) as exc:
         print(f'ERROR: {exc}')
         return 1
     return 0

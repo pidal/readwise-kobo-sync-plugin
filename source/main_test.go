@@ -22,7 +22,7 @@ func TestSqliteFixture(t *testing.T) {
 
 func TestPendingLongTextAndIds(t *testing.T) {
 	h := Highlight{ID: "id", Volume: "book", Text: strings.Repeat("文", 19000), Note: "This is a note", Title: "Chinese"}
-	pending := makePending([]Highlight{h}, map[string]bool{})
+	pending := makePending([]Highlight{h})
 	if len(pending) != 3 {
 		t.Fatalf("got %d parts", len(pending))
 	}
@@ -32,22 +32,32 @@ func TestPendingLongTextAndIds(t *testing.T) {
 	if pending[0].value.Note != "This is a note" || pending[1].value.Note != "" {
 		t.Fatal("note should only be on first chunk")
 	}
-	visited := map[string]bool{pending[0].key: true}
-	if count := len(makePending([]Highlight{h}, visited)); count != 2 {
-		t.Fatalf("expected 2 pending, got %d", count)
+	again := makePending([]Highlight{h})
+	for i, p := range pending {
+		if p.key != again[i].key {
+			t.Fatal("unstable part identity")
+		}
 	}
+	if pending[0].key == pending[1].key {
+		t.Fatal("parts share an identity")
+	}
+
 }
 
-func TestSyncPersistsOnlySuccessfulBatches(t *testing.T) {
+func TestSyncPersistsSuccessfulUploads(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "token.txt"), []byte("test-token"), 0600); err != nil {
+	data, err := prepareData(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "token.conf"), []byte("test-token"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	fake := newFakeReadwise(t)
 	defer fake.server.Close()
 	fake.failPost = 2
 	db := "../tests/fixtures/basic.sqlite"
-	_, err := sync(dir, db, fake.server.URL+"/api/v2/highlights/", fake.server.Client())
+	_, err = sync(dir, db, fake.server.URL+"/api/v2/highlights/", fake.server.Client())
 	if err == nil {
 		t.Fatal("expected interrupted sync")
 	}
@@ -55,7 +65,13 @@ func TestSyncPersistsOnlySuccessfulBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(saved.Uploaded) != 1 {
+	confirmed := 0
+	for _, rec := range saved.Records {
+		if rec.ID > 0 {
+			confirmed++
+		}
+	}
+	if confirmed != 1 {
 		t.Fatalf("expected one saved highlight: %+v", saved)
 	}
 	fake.failPost = 0
@@ -67,7 +83,7 @@ func TestSyncPersistsOnlySuccessfulBatches(t *testing.T) {
 		t.Fatal(result)
 	}
 	calls := fake.posts
-	if _, err := sync(dir, db, fake.server.URL+"/api/v2/highlights/", fake.server.Client()); err != nil {
+	if _, err = sync(dir, db, fake.server.URL+"/api/v2/highlights/", fake.server.Client()); err != nil {
 		t.Fatal(err)
 	}
 	if fake.posts != calls || len(fake.items) != 51 {
@@ -78,7 +94,7 @@ func TestSyncPersistsOnlySuccessfulBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rec := range saved.Records {
-		if rec.ID == 0 || rec.BookID == 0 || rec.Fingerprint == "" {
+		if rec.ID == 0 || rec.BookID == 0 {
 			t.Fatalf("missing identity: %+v", rec)
 		}
 	}
@@ -86,10 +102,14 @@ func TestSyncPersistsOnlySuccessfulBatches(t *testing.T) {
 
 func TestBadTokenNoUpload(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "token.txt"), []byte("PASTE_YOUR_TOKEN_HERE"), 0600); err != nil {
+	data, err := prepareData(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err := sync(dir, "../tests/fixtures/basic.sqlite", readwiseURL, nil)
+	if err := os.WriteFile(filepath.Join(data, "token.conf"), []byte("PASTE_YOUR_TOKEN_HERE"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = sync(dir, "../tests/fixtures/basic.sqlite", readwiseURL, nil)
 	if err == nil {
 		t.Fatal("expected token error")
 	}

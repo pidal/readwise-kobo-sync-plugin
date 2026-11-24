@@ -310,7 +310,7 @@ func sendReadwiseJSON(client *http.Client, method, endpoint, token string, paylo
 			return err
 		}
 		req.Header.Set("Authorization", "Token "+token)
-		req.Header.Set("User-Agent", "KoboReadwiseSync/1.3")
+		req.Header.Set("User-Agent", "KoboReadwiseSync")
 		if payload != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -363,8 +363,6 @@ func loadReadwiseBooks(client *http.Client, baseURL, token string) ([]readwiseBo
 		if result.Next == "" {
 			return books, nil
 		}
-		// The Books LIST endpoint allows only 20 requests/minute.
-		time.Sleep(3100 * time.Millisecond)
 	}
 	return nil, errors.New("Readwise book list exceeds 20 pages; cover sync aborted without changes")
 }

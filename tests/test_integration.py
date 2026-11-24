@@ -75,7 +75,6 @@ def run_test():
         d=Path(tmp)
         db=d/'KoboReader.sqlite'
         plugin=d/'plugin';plugin.mkdir()
-        (plugin/'token.txt').write_text('fake_token_abcdef\n')
         con=make_db(db,wal=True)
         assert (d/'KoboReader.sqlite-wal').exists()
         ret=invoke('-db',db,'-dir',plugin,'-dry-run')
@@ -108,6 +107,13 @@ def run_test():
         ret=invoke('-db',manydb,'-dir',plugin,'-dry-run')
         assert ret.returncode==0,ret.stderr
         assert 'Found 2001 Kobo highlights' in ret.stdout,ret.stdout
-    print('PASS: SQLite main DB, WAL checksums, hidden notes, overflow pages, interior B-tree pages')
+        # A normal failed run refreshes a damaged old log without network access.
+        (plugin / 'run.log').write_bytes(b'old log' + b'\x00' * 100)
+        ret = invoke('-db', db, '-dir', plugin)
+        assert ret.returncode != 0  # no token is configured in this test
+        log = (plugin / 'run.log').read_bytes()
+        assert b'\x00' not in log and b'token missing' in log, log
+        assert 'Sync failed' in (plugin / 'last-result.log').read_text()
+    print('PASS: SQLite extraction, WAL checksums, large tables and clean error logging')
 
 if __name__=='__main__':run_test()

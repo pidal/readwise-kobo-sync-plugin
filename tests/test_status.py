@@ -27,7 +27,7 @@ class StatusTests(unittest.TestCase):
             self.assertIn('Sync complete', result.stdout)
             self.assertIn('New: 2', result.stdout)
 
-    def test_running_sync_not_started_twice_and_legacy_text_wraps(self):
+    def test_running_sync_not_started_twice_and_text_wraps(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = self.setup_plugin(root)

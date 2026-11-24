@@ -1,20 +1,11 @@
-# Never commit private Readwise credentials, on-device state or local logs.
-**/token.txt
-**/state.json
-**/status.txt
-**/sync.log
-**/backfill.log
+# Private data and generated files
+**/data/
+**/token.conf
+**/sync-state.json
+**/last-result.log
+**/run.log
 .DS_Store
 __pycache__/
 *.pyc
-
-# v1.3 personal data and generated binaries
-**/data/
-**/readwise-sync-backups/
-**/token.conf
-**/sync-state.json*
-**/last-result.txt
-**/last-result.log
-**/run.log
-KOBOeReader/.adds/readwise-sync/readwise-sync-arm
-KOBOeReader/.adds/readwise-sync/readwise-sync-arm64
+*.zip
+releases/

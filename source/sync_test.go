@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,6 +15,9 @@ type fakeReadwise struct {
 	server                   *httptest.Server
 	items                    map[int64]ReadwiseHighlight
 	posts, patches, failPost int
+	requests, coverPatches   int
+	coverFail                bool
+	uniqueAcrossBooks        bool
 	loseResponse             bool
 	omitIDs                  bool
 	ambiguous                bool
@@ -24,6 +26,7 @@ type fakeReadwise struct {
 func newFakeReadwise(t *testing.T) *fakeReadwise {
 	f := &fakeReadwise{items: map[int64]ReadwiseHighlight{}}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests++
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/books/":
 			books := []readwiseBook{}
@@ -42,6 +45,9 @@ func newFakeReadwise(t *testing.T) *fakeReadwise {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/highlights/":
 			hs := []existingHighlight{}
 			for id, h := range f.items {
+				if f.uniqueAcrossBooks && r.URL.Query().Get("book_id") == "8" {
+					continue
+				}
 				hs = append(hs, existingHighlight{ID: id, Text: h.Text, Note: h.Note, LocationType: h.LocationType})
 			}
 			json.NewEncoder(w).Encode(map[string]any{"results": hs, "next": nil})
@@ -77,38 +83,17 @@ func newFakeReadwise(t *testing.T) *fakeReadwise {
 				return
 			}
 			fmt.Fprintf(w, `[{"id":7,"modified_highlights":[%d]}]`, id)
-		case r.Method == http.MethodPatch:
-			id, e := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/highlights/"), "/"), 10, 64)
-			h, ok := f.items[id]
-			if e != nil || !ok {
-				w.WriteHeader(404)
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/v2/books/"):
+			f.coverPatches++
+			if f.coverFail {
+				w.WriteHeader(400)
 				return
 			}
-			var body struct {
-				Text         string
-				Note         *string
-				Location     *int
-				LocationType string `json:"location_type"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Error(err)
-			}
-			h.Text = body.Text
-			if body.Note != nil {
-				h.Note = *body.Note
-				if strings.Contains(h.Note, "Kobo location:") || strings.Contains(h.Note, "Chapter:") {
-					t.Error("metadata leaked into note")
-				}
-			}
-			if body.Location != nil {
-				h.Location = *body.Location
-			}
-			if body.LocationType != "" {
-				t.Error("undocumented location_type PATCH")
-			}
-			f.items[id] = h
-			f.patches++
 			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodPatch:
+			f.patches++
+			t.Error("existing highlights must never be PATCHed")
+			w.WriteHeader(400)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL)
 			w.WriteHeader(404)
@@ -126,44 +111,35 @@ func runItems(t *testing.T, dir string, f *fakeReadwise, hs []Highlight) (string
 	}
 	return syncItems(path, filepath.Join(dir, "missing.sqlite"), f.server.URL+"/api/v2/highlights/", "test-token", state, hs, f.server.Client(), nil)
 }
-func TestOneWayEditsLocationsAndResume(t *testing.T) {
+func TestOnlyNewHighlightsAreUploaded(t *testing.T) {
 	f := newFakeReadwise(t)
 	defer f.server.Close()
 	dir := t.TempDir()
-	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Author: "Author", Text: "Passage", Note: "My note", Chapter: "First", ChapterIndexKnown: true, StartPath: "/2/10", StartOffset: 4, Position: 1}}
+	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Original", Note: "Personal", Position: 1}}
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	var id int64
-	for k := range f.items {
-		id = k
-	}
-	if f.items[id].Location != 1 || f.items[id].Note != "My note" {
-		t.Fatal(f.items)
-	}
-	hs[0].Text = "Edited passage"
-	hs[0].Note = ""
+	calls := f.requests
+	hs[0].Text = "Edited existing passage"
+	hs[0].Note = "Changed note"
 	hs[0].Position = 2
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.posts != 1 || f.patches != 1 || f.items[id].Location != 2 || f.items[id].Text != "Edited passage" || f.items[id].Note != "" {
-		t.Fatal("edit did not update original highlight")
+	if f.requests != calls || f.patches != 0 {
+		t.Fatal("existing highlight caused network requests")
 	}
-	hs[0].StartPath = ""
-	hs[0].Chapter = ""
-	hs[0].Position = 0
+	for _, h := range f.items {
+		if h.Text != "Original" || h.Note != "Personal" || h.Location != 1 {
+			t.Fatal("existing content changed")
+		}
+	}
+	hs = append(hs, Highlight{ID: "two", Volume: "book", Title: "Book", Text: "A new passage", Note: "New personal note", Position: 3})
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.items[id].Note != "" || f.items[id].Location != 2 || f.items[id].LocationType != "order" {
-		t.Fatal("personal note or existing order was changed")
-	}
-	if _, err := runItems(t, dir, f, hs); err != nil {
-		t.Fatal(err)
-	}
-	if f.posts != 1 || f.patches != 2 {
-		t.Fatal("unchanged item resent")
+	if f.posts != 2 || f.patches != 0 || len(f.items) != 2 {
+		t.Fatal("new highlight not uploaded exactly once")
 	}
 }
 func TestLostResponseReconcilesBeforePosting(t *testing.T) {
@@ -179,11 +155,11 @@ func TestLostResponseReconcilesBeforePosting(t *testing.T) {
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.posts != 1 || len(f.items) != 1 || f.patches != 1 {
+	if f.posts != 1 || len(f.items) != 1 || f.patches != 0 {
 		t.Fatal("accepted upload duplicated")
 	}
 }
-func TestLegacyMappingAndAmbiguity(t *testing.T) {
+func TestExistingMatchesAndAmbiguity(t *testing.T) {
 	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Original", Position: 2}}
 	for _, ambiguous := range []bool{false, true} {
 		t.Run(fmt.Sprint(ambiguous), func(t *testing.T) {
@@ -192,43 +168,33 @@ func TestLegacyMappingAndAmbiguity(t *testing.T) {
 			dir := t.TempDir()
 			f.items[99] = ReadwiseHighlight{Title: "Book", Text: "Original"}
 			f.ambiguous = ambiguous
-			state := stateFile{Version: 1, Uploaded: map[string]bool{makePending(hs, map[string]bool{})[0].key: true}}
-			if err := saveState(filepath.Join(dir, "sync-state.json"), state); err != nil {
-				t.Fatal(err)
+
+			summary, err := runItems(t, dir, f, hs)
+			if err != nil || f.posts != 0 || f.patches != 0 {
+				t.Fatalf("existing highlight changed: %v", err)
 			}
-			_, err := runItems(t, dir, f, hs)
-			if ambiguous {
-				if err == nil || f.patches != 0 || f.posts != 0 {
-					t.Fatal("ambiguous book changed")
-				}
-			} else if err != nil || f.patches != 1 || f.posts != 0 {
-				t.Fatalf("legacy not adopted: %v", err)
+			if ambiguous && !strings.Contains(summary, "Needs review: 1") {
+				t.Fatal(summary)
+			}
+			if !ambiguous && !strings.Contains(summary, "Already synced: 1") {
+				t.Fatal(summary)
 			}
 		})
 	}
 }
-func TestDataMigrationAndFailClosedState(t *testing.T) {
+func TestCorruptHistoryFailsClosed(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "token.txt"), []byte("private"), 0600)
-	os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"version":1,"uploaded":{"a":true}}`), 0600)
 	data, err := prepareData(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := loadState(filepath.Join(data, "sync-state.json"))
-	if err != nil || !state.Uploaded["a"] {
-		t.Fatal("lost history")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "token.txt")); !os.IsNotExist(err) {
-		t.Fatal("legacy token still importable")
-	}
-	os.WriteFile(filepath.Join(dir, "token.txt"), []byte("conflicting"), 0600)
-	if _, err := prepareData(dir); err == nil {
-		t.Fatal("conflicting token overwritten")
-	}
-	os.WriteFile(filepath.Join(data, "sync-state.json"), []byte(`broken`), 0600)
-	if _, err := loadState(filepath.Join(data, "sync-state.json")); err == nil {
-		t.Fatal("corrupt history silently reset")
+	for _, broken := range []string{`broken`, `{}`, `{"version":2,"records":null}`} {
+		if err := os.WriteFile(filepath.Join(data, "sync-state.json"), []byte(broken), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadState(filepath.Join(data, "sync-state.json")); err == nil {
+			t.Fatal("corrupt history silently reset")
+		}
 	}
 }
 
@@ -241,13 +207,13 @@ func TestAcceptedResponseWithoutIDsIsReconciled(t *testing.T) {
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.posts != 1 || f.patches != 1 {
+	if f.posts != 1 || f.patches != 0 {
 		t.Fatalf("failed to reconcile accepted upload: posts=%d patches=%d", f.posts, f.patches)
 	}
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.posts != 1 || f.patches != 1 {
+	if f.posts != 1 || f.patches != 0 {
 		t.Fatal("reconciled ID was not persisted")
 	}
 }
@@ -259,36 +225,31 @@ func TestAdoptedPageLocationIsPreserved(t *testing.T) {
 	if _, err := runItems(t, t.TempDir(), f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.items[99].Location != 42 || f.items[99].LocationType != "page" || f.items[99].Note != "Kobo note" {
+	if f.items[99].Location != 42 || f.items[99].LocationType != "page" || f.items[99].Note != "" {
 		t.Fatal("adopted page location overwritten")
 	}
 }
-func TestRemovedHighlightsAreReportedAndRetained(t *testing.T) {
+func TestRemovedHighlightsAreRetainedWithoutRequests(t *testing.T) {
 	f := newFakeReadwise(t)
 	defer f.server.Close()
 	dir := t.TempDir()
-	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Text"}}
-	if _, err := runItems(t, dir, f, hs); err != nil {
+	if _, err := runItems(t, dir, f, []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Text"}}); err != nil {
 		t.Fatal(err)
 	}
-	summary, err := runItems(t, dir, f, nil)
-	if err != nil {
+	calls := f.requests
+	if _, err := runItems(t, dir, f, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.items) != 1 || !strings.Contains(summary, "Needs review: 1") {
-		t.Fatal(summary)
-	}
-	report, err := os.ReadFile(filepath.Join(dir, "sync-review.log"))
-	if err != nil || !strings.Contains(string(report), "retained") {
-		t.Fatal("missing removal report")
+	if len(f.items) != 1 || f.requests != calls {
+		t.Fatal("removed highlight caused requests")
 	}
 }
 
-func TestPersonalNoteOnlyChangesSync(t *testing.T) {
+func TestExistingPersonalNotesAreNotUploadedAgain(t *testing.T) {
 	f := newFakeReadwise(t)
 	defer f.server.Close()
 	dir := t.TempDir()
-	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Text", Note: "Personal", Chapter: "Chapter", StartPath: "/2/4"}}
+	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Text", Note: "Personal", StartPath: "/2/4"}}
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
@@ -296,12 +257,71 @@ func TestPersonalNoteOnlyChangesSync(t *testing.T) {
 	if _, err := runItems(t, dir, f, hs); err != nil {
 		t.Fatal(err)
 	}
-	if f.posts != 1 || f.patches != 1 {
-		t.Fatal("personal note change did not update existing highlight")
+	if f.posts != 1 || f.patches != 0 {
+		t.Fatal("existing note was uploaded again")
 	}
 	for _, h := range f.items {
-		if h.Note != "Edited on Kobo" {
+		if h.Note != "Personal" {
 			t.Fatal("personal note modified")
 		}
+	}
+}
+
+func TestUniquePassageAcrossDuplicateBooksIsRecognized(t *testing.T) {
+	f := newFakeReadwise(t)
+	defer f.server.Close()
+	f.ambiguous = true
+	f.uniqueAcrossBooks = true
+	f.items[99] = ReadwiseHighlight{Title: "Book", Text: "Already in Readwise"}
+	summary, err := runItems(t, t.TempDir(), f, []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: "Already in Readwise"}})
+	if err != nil || f.posts != 0 || !strings.Contains(summary, "Already synced: 1") {
+		t.Fatalf("failed unique match: %v %s", err, summary)
+	}
+}
+func TestLongHighlightResumesButEditsDoNotAddParts(t *testing.T) {
+	f := newFakeReadwise(t)
+	defer f.server.Close()
+	dir := t.TempDir()
+	// Distinct chunks so Readwise deduplication cannot collapse them.
+	text := strings.Repeat("a", 8000) + strings.Repeat("b", 8000) + strings.Repeat("c", 3000)
+	hs := []Highlight{{ID: "one", Volume: "book", Title: "Book", Text: text}}
+	f.failPost = 2
+	if _, err := runItems(t, dir, f, hs); err == nil {
+		t.Fatal("expected interruption")
+	}
+	f.failPost = 0
+	if _, err := runItems(t, dir, f, hs); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.items) != 3 {
+		t.Fatal("missing original parts")
+	}
+	calls := f.requests
+	hs[0].Text += strings.Repeat("d", 10000)
+	if _, err := runItems(t, dir, f, hs); err != nil {
+		t.Fatal(err)
+	}
+	if f.requests != calls || len(f.items) != 3 {
+		t.Fatal("edit was treated as new highlight parts")
+	}
+}
+func TestCoverFailureDoesNotFailSavedHighlights(t *testing.T) {
+	f := newFakeReadwise(t)
+	defer f.server.Close()
+	dir := t.TempDir()
+	f.coverFail = true
+	epub := filepath.Join(dir, "book.epub")
+	writeEPUB(t, epub, testJPEG(t))
+	hs := []Highlight{{ID: "one", Volume: epub, Title: "Book", Text: "Text"}}
+	summary, err := runItems(t, dir, f, hs)
+	if err != nil || !strings.Contains(summary, "Sync complete") || !strings.Contains(summary, "Covers skipped") {
+		t.Fatalf("false failure: %v %s", err, summary)
+	}
+	calls := f.requests
+	if _, err := runItems(t, dir, f, hs); err != nil {
+		t.Fatal(err)
+	}
+	if f.requests != calls || f.posts != 1 {
+		t.Fatal("retry repeated saved work")
 	}
 }

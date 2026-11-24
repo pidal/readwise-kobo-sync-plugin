@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestChapterExtractionAndLocation(t *testing.T) {
+func TestReadingOrderAndPersonalNotes(t *testing.T) {
 	hs, err := loadHighlights("../tests/fixtures/chapters.sqlite")
 	if err != nil {
 		t.Fatal(err)
@@ -17,13 +17,10 @@ func TestChapterExtractionAndLocation(t *testing.T) {
 	for _, h := range hs {
 		byID[h.ID] = h
 	}
-	if byID["id-early"].Chapter != "Chapter One" || byID["id-late"].Chapter != "Chapter Two" {
-		t.Fatal("chapter title not joined")
-	}
 	if byID["id-early"].Position != 1 || byID["id-first"].Position != 2 || byID["id-late"].Position != 3 {
 		t.Fatalf("wrong book order: %+v", byID)
 	}
-	pending := makePending(hs, map[string]bool{})
+	pending := makePending(hs)
 	for _, p := range pending {
 		if p.value.LocationType != "order" || p.value.Location == 0 {
 			t.Fatalf("wrong Readwise position: %+v", p)
@@ -37,11 +34,5 @@ func TestChapterExtractionAndLocation(t *testing.T) {
 	}
 	if x := personalNote("my note"); x != "my note" {
 		t.Fatal(x)
-	}
-}
-
-func TestChapterBackfillDisabled(t *testing.T) {
-	if _, err := backfillChapters(t.TempDir(), "missing", "invalid", nil); err == nil {
-		t.Fatal("backfill must not write notes")
 	}
 }

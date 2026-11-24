@@ -2,6 +2,9 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
+from io import StringIO
 
 spec = importlib.util.spec_from_file_location('installer', Path(__file__).resolve().parents[1] / 'install.py')
 installer = importlib.util.module_from_spec(spec)
@@ -9,21 +12,19 @@ spec.loader.exec_module(installer)
 
 
 class InstallTests(unittest.TestCase):
-    def test_migration_and_conflict(self):
+    def test_setup_prompts_once_without_printing_token(self):
         with tempfile.TemporaryDirectory() as tmp:
-            plugin = Path(tmp)
-            (plugin / 'token.txt').write_text('private-token')
-            (plugin / 'state.json').write_text('{"version":1,"uploaded":{"x":true}}')
-            installer.migrate_data(plugin)
-            installer.migrate_data(plugin)
-            self.assertFalse((plugin / 'token.txt').exists())
-            self.assertEqual((plugin / 'data/token.conf').read_text(), 'private-token')
-            self.assertIn('"x":true', (plugin / 'data/sync-state.json').read_text())
-            (plugin / 'token.txt').write_text('other-token')
-            with self.assertRaises(ValueError):
-                installer.migrate_data(plugin)
-            self.assertEqual((plugin / 'token.txt').read_text(), 'other-token')
-            self.assertEqual((plugin / 'data/token.conf').read_text(), 'private-token')
+            token_path = Path(tmp) / 'token.conf'
+            output = StringIO()
+            with patch.object(installer, 'install', return_value=token_path), \
+                 patch.object(installer.sys, 'argv', ['install.py', tmp]), \
+                 patch('getpass.getpass', return_value='private-test-token') as prompt, \
+                 redirect_stdout(output):
+                self.assertEqual(installer.main(), 0)
+                self.assertEqual(installer.main(), 0)
+                prompt.assert_called_once()
+            self.assertEqual(token_path.read_text().strip(), 'private-test-token')
+            self.assertNotIn('private-test-token', output.getvalue())
 
     def test_config_preserves_rules_and_is_idempotent(self):
         for original in ('[Other]\nKeep=yes\n',
@@ -44,7 +45,7 @@ class InstallTests(unittest.TestCase):
                     self.assertIn('old-rule', updated)
                 self.assertEqual(config.with_name(config.name + '.readwise-sync.bak').read_text(), original)
 
-    def test_upgrade_never_copies_personal_payload(self):
+    def test_clean_install_and_repeat_preserve_personal_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             device = root / 'device'
@@ -61,18 +62,21 @@ class InstallTests(unittest.TestCase):
             (source / 'data/token.conf').write_text('DO-NOT-COPY')
             plugin = device / '.adds/readwise-sync'
             plugin.mkdir(parents=True)
-            (plugin / 'token.txt').write_text('my-token')
-            (plugin / 'state.json').write_text('my-history')
+
             old_payload = installer.PAYLOAD
             try:
                 installer.PAYLOAD = payload
-                installer.install(device)
+                token_path = installer.install(device)
+                self.assertTrue(token_path.parent.is_dir())
+                self.assertFalse(token_path.exists())
+                token_path.write_text('my-token')
+                (token_path.parent / 'sync-state.json').write_text('my-history')
                 installer.install(device)
             finally:
                 installer.PAYLOAD = old_payload
             self.assertEqual((plugin / 'data/token.conf').read_text(), 'my-token')
             self.assertEqual((plugin / 'data/sync-state.json').read_text(), 'my-history')
-            self.assertTrue(list((device / '.adds/readwise-sync-backups').glob('upgrade-*/state.json')))
+            self.assertFalse((device / '.adds/readwise-sync-backups').exists())
 
 
 if __name__ == '__main__':

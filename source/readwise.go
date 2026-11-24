@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 )
 
 type existingHighlight struct {
@@ -29,12 +28,6 @@ func loadBookHighlights(client *http.Client, baseURL, token string, id int64) ([
 		if response.Next == "" {
 			return all, nil
 		}
-		time.Sleep(3100 * time.Millisecond) // Highlight LIST rate limit: 20/min
 	}
 	return nil, errors.New("too many Readwise highlight pages for one book")
-}
-
-// Retain the legacy entry point so old launchers cannot modify notes.
-func backfillChapters(dir, dbpath, highlightsURL string, client *http.Client) (string, error) {
-	return "", errors.New("chapter backfill is disabled: notes are reserved for personal annotations")
 }

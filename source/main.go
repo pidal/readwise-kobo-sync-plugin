@@ -40,7 +40,6 @@ type Highlight struct {
 	Title             string
 	Author            string
 	ImageID           string
-	Chapter           string
 	ChapterIndex      int
 	ChapterIndexKnown bool
 	StartPath         string
@@ -66,9 +65,8 @@ type pendingItem struct {
 }
 
 type stateFile struct {
-	Version  int                   `json:"version"`
-	Uploaded map[string]bool       `json:"uploaded"`
-	Records  map[string]syncRecord `json:"records,omitempty"`
+	Version int                   `json:"version"`
+	Records map[string]syncRecord `json:"records"`
 }
 
 func main() {
@@ -76,7 +74,6 @@ func main() {
 	db := flag.String("db", defaultDB, "Kobo SQLite database path")
 	dry := flag.Bool("dry-run", false, "count highlights without uploading")
 	status := flag.Bool("status", false, "display last sync result")
-	backfill := flag.Bool("backfill-chapters", false, "opt-in chapter backfill of previously uploaded highlights")
 	flag.Parse()
 	if *status {
 		b, err := os.ReadFile(filepath.Join(*dir, "last-result.log"))
@@ -105,14 +102,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer os.Remove(filepath.Join(*dir, ".lock"))
-	writeStatus(*dir, "Syncing...\nReading Kobo highlights.")
-	var result string
-	var err error
-	if *backfill {
-		result, err = backfillChapters(*dir, *db, readwiseURL, nil)
-	} else {
-		result, err = sync(*dir, *db, readwiseURL, nil)
+	if logfile, e := os.OpenFile(filepath.Join(*dir, "run.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); e == nil {
+		defer logfile.Close()
+		os.Stdout = logfile
+		os.Stderr = logfile
 	}
+
+	writeStatus(*dir, "Syncing...\nReading Kobo highlights.")
+	result, err := sync(*dir, *db, readwiseURL, nil)
 	if err != nil {
 		result = "Sync failed: " + err.Error()
 		fmt.Fprintln(os.Stderr, result)
@@ -157,7 +154,6 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 	defer r.close()
 	type metadata struct{ title, author, imageID string }
 	type chapterData struct {
-		title    string
 		index    int
 		hasIndex bool
 	}
@@ -179,7 +175,7 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 			// Chapter rows are generally ContentType=9. Use the exact
 			// Bookmark.ContentID join; never infer a chapter from a filename.
 			index, idxErr := strconv.Atoi(strings.TrimSpace(str(row["volumeindex"])))
-			chapters[id] = chapterData{title: title, index: index, hasIndex: idxErr == nil}
+			chapters[id] = chapterData{index: index, hasIndex: idxErr == nil}
 		}
 		return nil
 	})
@@ -206,16 +202,11 @@ func loadHighlights(dbpath string) ([]Highlight, error) {
 			book.title = filenameTitle(vol)
 		}
 		chapter := chapters[str(row["contentid"])]
-		// A few firmware versions use a chapter row whose title repeats
-		// the book title; avoid presenting that as a chapter.
-		if strings.EqualFold(strings.TrimSpace(chapter.title), strings.TrimSpace(book.title)) {
-			chapter.title = ""
-		}
 		startOffset, _ := strconv.Atoi(strings.TrimSpace(str(row["startoffset"])))
 		highlights = append(highlights, Highlight{
 			ID: id, Volume: vol, Text: text, Note: strings.TrimSpace(str(row["annotation"])),
 			Created: str(row["datecreated"]), Title: book.title, Author: book.author, ImageID: book.imageID,
-			Chapter: chapter.title, ChapterIndex: chapter.index, ChapterIndexKnown: chapter.hasIndex,
+			ChapterIndex: chapter.index, ChapterIndexKnown: chapter.hasIndex,
 			StartPath: str(row["startcontainerpath"]), StartOffset: startOffset,
 		})
 		return nil
@@ -339,7 +330,7 @@ func personalNote(note string) string {
 	return note
 }
 
-func makePending(items []Highlight, uploaded map[string]bool) []pendingItem {
+func makePending(items []Highlight) []pendingItem {
 	var pending []pendingItem
 	for _, h := range items {
 		chars := []rune(h.Text)
@@ -351,9 +342,6 @@ func makePending(items []Highlight, uploaded map[string]bool) []pendingItem {
 			chunk := string(chars[start:end])
 			sum := sha256.Sum256([]byte(h.Volume + "\x00" + h.ID + "\x00" + strconv.Itoa(part)))
 			key := hex.EncodeToString(sum[:])
-			if uploaded[key] {
-				continue
-			}
 			value := ReadwiseHighlight{
 				Text: chunk, Title: truncateRunes(h.Title, 511), Author: truncateRunes(h.Author, 1024),
 				SourceType: "kobo_nickel_sync", Category: "books", HighlightedAt: parseDate(h.Created),
@@ -372,7 +360,7 @@ func makePending(items []Highlight, uploaded map[string]bool) []pendingItem {
 }
 
 func loadState(path string) (stateFile, error) {
-	s := stateFile{Version: 1, Uploaded: make(map[string]bool)}
+	s := stateFile{Version: 2, Records: make(map[string]syncRecord)}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return s, nil
@@ -384,17 +372,14 @@ func loadState(path string) (stateFile, error) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return s, fmt.Errorf("read sync state: %w", err)
 	}
-	if fields["version"] == nil || fields["uploaded"] == nil || string(fields["uploaded"]) == "null" {
-		return s, errors.New("sync history is incomplete; restore a backup instead of resetting it")
+	if fields["version"] == nil || fields["records"] == nil || string(fields["records"]) == "null" {
+		return s, errors.New("sync history is incomplete; restore your saved data instead of resetting it")
 	}
 	if err := json.Unmarshal(data, &s); err != nil {
 		return s, fmt.Errorf("read sync state: %w", err)
 	}
-	if s.Version != 1 && s.Version != 2 {
+	if s.Version != 2 {
 		return s, fmt.Errorf("unsupported sync state version %d", s.Version)
-	}
-	if s.Uploaded == nil {
-		s.Uploaded = make(map[string]bool)
 	}
 	if s.Records == nil {
 		s.Records = make(map[string]syncRecord)
